@@ -462,7 +462,7 @@ class ForumDetailPageScraper {
           console.log(`⏭️    page ${pageNum} failed to load. Restarting browser...`);
           await this.restartBrowser();
           
-          pageNum--;
+          this.pagesScraped++;
         }
       }
 
