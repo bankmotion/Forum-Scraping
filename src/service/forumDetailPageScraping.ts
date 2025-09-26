@@ -420,37 +420,67 @@ class ForumDetailPageScraper {
         const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
         console.log(`Page URL: ${pageUrl}`);
 
-        await this.page!.goto(pageUrl, {
-          waitUntil: "networkidle2",
-        });
+        try {
+          // Add 30-second timeout for page loading
+          await Promise.race([
+            this.page!.goto(pageUrl, {
+              waitUntil: "networkidle2",
+            }),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Page load timeout after 30 seconds')), 30000)
+            )
+          ]);
 
-        // Handle cookie consent on first page only
-        if (pageNum === 1) {
-          await this.handleCookieConsent();
-        }
+          // Handle cookie consent on first page only
+          if (pageNum === 1) {
+            await this.handleCookieConsent();
+          }
 
-        const posts = await this.scrapePagePosts();
+          const posts = await this.scrapePagePosts();
 
-        // Save posts to database with batch processing
-        await this.savePostsToDatabase(thread.threadId, posts);
+          // Save posts to database with batch processing
+          await this.savePostsToDatabase(thread.threadId, posts);
 
-        // Clear memory cache after each page is processed
-        await this.clearPageMemoryCache();
+          // Clear memory cache after each page is processed
+          await this.clearPageMemoryCache();
 
-        // Increment pages scraped counter
-        this.pagesScraped++;
+          // Increment pages scraped counter
+          this.pagesScraped++;
 
-        // Check if we need to restart browser
-        if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-          console.log(
-            `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
-          );
-          await this.restartBrowser();
-        }
+          // Check if we need to restart browser
+          if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
+            console.log(
+              `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
+            );
+            await this.restartBrowser();
+          }
 
-        // Add delay between pages
-        if (pageNum < totalPages) {
-          await this.delay(2000);
+          // Add delay between pages
+          if (pageNum < totalPages) {
+            await this.delay(2000);
+          }
+
+        } catch (error) {
+          console.error(`❌ Page ${pageNum} failed to load within 30 seconds: ${pageUrl}`);
+          console.error(`Error: ${error}`);
+          
+          // Skip this page and continue to next page
+          console.log(`⏭️ Skipping page ${pageNum} and continuing to next page...`);
+          
+          pageNum--;
+          
+          // Check if we need to restart browser even after timeout
+          if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
+            console.log(
+              `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
+            );
+            await this.restartBrowser();
+          }
+          
+          // Add delay before trying next page
+          if (pageNum < totalPages) {
+            await this.delay(2000);
+          }
         }
       }
 
