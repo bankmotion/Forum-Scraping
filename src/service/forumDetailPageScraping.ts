@@ -1,11 +1,21 @@
-import puppeteer, { Browser, Page } from "puppeteer";
+import puppeteer, { Browser, Page, LaunchOptions } from "puppeteer";
 import { ForumThread } from "../model/ForumThread";
 import { ForumPost } from "../model/ForumPost";
 import { sequelize } from "../config/database";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import dotenv from "dotenv";
 import { S3Service } from "./s3Service";
+import {
+  createTempUserDataDir,
+  deleteTempUserDataDir,
+  clearSystemCaches,
+  getMemoryUsage,
+  clearBrowserCache,
+  createBrowserConfig,
+  delay
+} from "../utils";
 dotenv.config();
 
 interface PostData {
@@ -31,6 +41,7 @@ class ForumDetailPageScraper {
   private s3Service: S3Service;
   private pagesScraped: number = 0;
   private readonly PAGES_BEFORE_RESTART: number = 100;
+  private tempDir: string = "";
 
   constructor() {
     this.cookiesPath = path.join(__dirname, "../../cookies.json");
@@ -42,38 +53,30 @@ class ForumDetailPageScraper {
     this.s3Service = new S3Service();
   }
 
+  private async initializeBrowser(): Promise<{
+    browser: Browser;
+    tempDir: string;
+  }> {
+    const tempDir = createTempUserDataDir();
+    const browserConfig = createBrowserConfig(this.mode, tempDir);
+    
+    const browser = await puppeteer.launch(browserConfig);
+    console.log("Browser initialized");
+
+    return { browser, tempDir };
+  }
+
   async initialize(): Promise<void> {
-    // Configure browser launch options with cache clearing for production
-    const launchOptions: any = {
-      headless: this.mode === "production" ? true : false,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      defaultViewport: { width: 1280, height: 720 },
-    };
-
-    // Add cache and memory clearing options for production mode
-    if (this.mode === "production") {
-      launchOptions.args.push(
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
-        "--disable-features=TranslateUI",
-        "--disable-ipc-flooding-protection",
-        "--memory-pressure-off",
-        "--max_old_space_size=4096"
-      );
-    }
-
-    this.browser = await puppeteer.launch(launchOptions);
+    const { browser, tempDir } = await this.initializeBrowser();
+    this.browser = browser;
+    this.tempDir = tempDir;
 
     this.page = await this.browser.newPage();
 
     // Clear cache and cookies for production mode
     if (this.mode === "production") {
-      await this.clearBrowserCache();
+      await clearBrowserCache(this.page);
+      await clearSystemCaches();
     }
 
     await this.page.setUserAgent(
@@ -707,7 +710,7 @@ class ForumDetailPageScraper {
 
       // Clear system-level cache for production mode
       if (this.mode === "production") {
-        await this.clearSystemCache();
+        await clearSystemCaches();
       }
 
       console.log("Browser cache and memory cleared successfully");
@@ -716,61 +719,23 @@ class ForumDetailPageScraper {
     }
   }
 
-  async clearSystemCache(): Promise<void> {
-    try {
-      console.log("Clearing system cache (buff/cache)...");
-      
-      // Import child_process for executing system commands
-      const { exec } = require('child_process');
-      const { promisify } = require('util');
-      const execAsync = promisify(exec);
-
-      // Sync filesystem to ensure all data is written
-      await execAsync('sync');
-      
-      // Clear page cache, dentries and inodes
-      await execAsync('echo 3 > /proc/sys/vm/drop_caches');
-      
-      // Alternative method if the above doesn't work
-      try {
-        await execAsync('sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"');
-      } catch (sudoError) {
-        console.log("Could not clear cache with sudo, trying without sudo...");
-      }
-
-      console.log("System cache cleared successfully");
-    } catch (error) {
-      console.error("Error clearing system cache:", error);
-      // Don't throw error as this is not critical for scraping functionality
-    }
-  }
-
-  async getMemoryUsage(): Promise<void> {
-    try {
-      const { exec } = require('child_process');
-      const { promisify } = require('util');
-      const execAsync = promisify(exec);
-
-      const { stdout } = await execAsync('free -h');
-      console.log("Current memory usage:");
-      console.log(stdout);
-    } catch (error) {
-      console.error("Error getting memory usage:", error);
-    }
-  }
-
   async restartBrowser(): Promise<void> {
     try {
       console.log("Restarting browser...");
       
       // Show memory usage before restart
-      await this.getMemoryUsage();
+      await getMemoryUsage();
       
       // Close current browser
       if (this.browser) {
         await this.browser.close();
         this.browser = null;
         this.page = null;
+      }
+
+      // Clean up temp directory
+      if (this.tempDir) {
+        await deleteTempUserDataDir(this.mode);
       }
 
       // Reset page counter
@@ -780,7 +745,7 @@ class ForumDetailPageScraper {
       await this.initialize();
       
       // Show memory usage after restart
-      await this.getMemoryUsage();
+      await getMemoryUsage();
       
       console.log("Browser restarted successfully");
     } catch (error) {
@@ -790,7 +755,7 @@ class ForumDetailPageScraper {
   }
 
   private async delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return delay(ms);
   }
 
   async close(): Promise<void> {
