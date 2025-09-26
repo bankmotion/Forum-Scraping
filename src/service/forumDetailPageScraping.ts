@@ -381,7 +381,9 @@ class ForumDetailPageScraper {
 
         // Check if we need to restart browser
         if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-          console.log(`Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`);
+          console.log(
+            `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
+          );
           await this.restartBrowser();
         }
 
@@ -622,45 +624,35 @@ class ForumDetailPageScraper {
       const existingPostIds = new Set(existingPosts.map((post) => post.postId));
 
       console.log(
-        `Found ${existingPostIds.size} existing posts for thread ${threadId}`
+        `---------------Found ${existingPostIds.size} existing posts for thread ${threadId}`
       );
-
-      let newPostsCount = 0;
-      let skippedPostsCount = 0;
 
       for (const postData of posts) {
         // Check if post already exists
         if (existingPostIds.has(postData.postId)) {
-          console.log(`Post ${postData.postId} already exists, skipping...`);
-          skippedPostsCount++;
           continue;
         }
 
-        newPostsCount++;
-
         // Upload media to S3 and get new URLs
-        let processedMedias = postData.medias;
+        let processedMedias: string[] = [];
 
         if (postData.medias.length > 0) {
-          console.log(
-            `Uploading ${postData.medias.length} media files for post ${postData.postId}...`
-          );
           try {
             processedMedias = await this.s3Service.uploadMediaUrls(
               postData.medias,
               threadId,
               postData.postId
             );
-            console.log(
-              `Successfully uploaded media for post ${postData.postId}, processedMedias: ${processedMedias}`
-            );
+            if (processedMedias.length > 0) {
+              console.log(
+                `Successfully uploaded media for post ${postData.postId}, processedMedias: ${processedMedias}`
+              );
+            }
           } catch (error) {
             console.error(
               `Error uploading media for post ${postData.postId}:`,
               error
             );
-            // Keep original URLs if upload fails
-            processedMedias = [];
           }
         }
 
@@ -672,12 +664,11 @@ class ForumDetailPageScraper {
             content: postData.content,
             medias: JSON.stringify(processedMedias),
           });
+          console.log(
+            `Successfully saved post ${postData.postId} to database, processedMedias length: ${processedMedias.length}`
+          );
         }
       }
-
-      console.log(
-        `Thread ${threadId}: Processed ${newPostsCount} new posts, skipped ${skippedPostsCount} existing posts`
-      );
     } catch (error) {
       console.error("Error saving posts to database:", error);
     }
@@ -691,11 +682,11 @@ class ForumDetailPageScraper {
 
       // Clear browser cache
       const client = await this.page.target().createCDPSession();
-      await client.send('Network.clearBrowserCache');
-      await client.send('Network.clearBrowserCookies');
-      
+      await client.send("Network.clearBrowserCache");
+      await client.send("Network.clearBrowserCookies");
+
       // Clear memory
-      await client.send('Runtime.evaluate', {
+      await client.send("Runtime.evaluate", {
         expression: `
           if (window.gc) {
             window.gc();
@@ -706,23 +697,74 @@ class ForumDetailPageScraper {
               names.forEach(name => caches.delete(name));
             });
           }
-        `
+        `,
       });
 
       // Force garbage collection if available
-      await client.send('HeapProfiler.collectGarbage');
-      
+      await client.send("HeapProfiler.collectGarbage");
+
       await client.detach();
-      
+
+      // Clear system-level cache for production mode
+      if (this.mode === "production") {
+        await this.clearSystemCache();
+      }
+
       console.log("Browser cache and memory cleared successfully");
     } catch (error) {
       console.error("Error clearing browser cache:", error);
     }
   }
 
+  async clearSystemCache(): Promise<void> {
+    try {
+      console.log("Clearing system cache (buff/cache)...");
+      
+      // Import child_process for executing system commands
+      const { exec } = require('child_process');
+      const { promisify } = require('util');
+      const execAsync = promisify(exec);
+
+      // Sync filesystem to ensure all data is written
+      await execAsync('sync');
+      
+      // Clear page cache, dentries and inodes
+      await execAsync('echo 3 > /proc/sys/vm/drop_caches');
+      
+      // Alternative method if the above doesn't work
+      try {
+        await execAsync('sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"');
+      } catch (sudoError) {
+        console.log("Could not clear cache with sudo, trying without sudo...");
+      }
+
+      console.log("System cache cleared successfully");
+    } catch (error) {
+      console.error("Error clearing system cache:", error);
+      // Don't throw error as this is not critical for scraping functionality
+    }
+  }
+
+  async getMemoryUsage(): Promise<void> {
+    try {
+      const { exec } = require('child_process');
+      const { promisify } = require('util');
+      const execAsync = promisify(exec);
+
+      const { stdout } = await execAsync('free -h');
+      console.log("Current memory usage:");
+      console.log(stdout);
+    } catch (error) {
+      console.error("Error getting memory usage:", error);
+    }
+  }
+
   async restartBrowser(): Promise<void> {
     try {
       console.log("Restarting browser...");
+      
+      // Show memory usage before restart
+      await this.getMemoryUsage();
       
       // Close current browser
       if (this.browser) {
@@ -736,6 +778,9 @@ class ForumDetailPageScraper {
 
       // Reinitialize browser (this will include cache clearing in production)
       await this.initialize();
+      
+      // Show memory usage after restart
+      await this.getMemoryUsage();
       
       console.log("Browser restarted successfully");
     } catch (error) {
