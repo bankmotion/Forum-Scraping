@@ -1,0 +1,27 @@
+{
+  "name": "form-scrp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node index.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.895.0",
+    "@aws-sdk/s3-request-presigner": "^3.895.0",
+    "@types/puppeteer": "^5.4.7",
+    "dotenv": "^17.2.2",
+    "mysql2": "^3.15.0",
+    "puppeteer": "^24.22.2",
+    "reflect-metadata": "^0.2.2",
+    "sequelize": "^6.37.7",
+    "sequelize-typescript": "^2.1.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
