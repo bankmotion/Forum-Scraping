@@ -48,7 +48,7 @@ class ForumDetailPageScraper {
   private mode: string;
   private s3Service: S3Service;
   private pagesScraped: number = 0;
-  private readonly PAGES_BEFORE_RESTART: number = 100;
+  private readonly PAGES_BEFORE_RESTART: number = 20; // Changed from 100 to 20
   private tempDir: string = "";
 
   // Batch processing configuration
