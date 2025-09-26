@@ -434,6 +434,9 @@ class ForumDetailPageScraper {
         // Save posts to database with batch processing
         await this.savePostsToDatabase(thread.threadId, posts);
 
+        // Clear memory cache after each page is processed
+        await this.clearPageMemoryCache();
+
         // Increment pages scraped counter
         this.pagesScraped++;
 
@@ -974,6 +977,51 @@ class ForumDetailPageScraper {
       console.log("Browser cache and memory cleared successfully");
     } catch (error) {
       console.error("Error clearing browser cache:", error);
+    }
+  }
+
+  /**
+   * Clear memory cache after each page is processed
+   * Lightweight memory cleanup to prevent accumulation
+   */
+  async clearPageMemoryCache(): Promise<void> {
+    try {
+      if (!this.page) return;
+
+      console.log("Clearing page memory cache...");
+
+      // Clear browser cache
+      const client = await this.page.target().createCDPSession();
+      await client.send("Network.clearBrowserCache");
+
+      // Clear memory and force garbage collection
+      await client.send("Runtime.evaluate", {
+        expression: `
+          if (window.gc) {
+            window.gc();
+          }
+          // Clear any cached data
+          if (window.caches) {
+            caches.keys().then(names => {
+              names.forEach(name => caches.delete(name));
+            });
+          }
+        `,
+      });
+
+      // Force garbage collection
+      await client.send("HeapProfiler.collectGarbage");
+
+      await client.detach();
+
+      // Force Node.js garbage collection if available
+      if (global.gc) {
+        global.gc();
+      }
+
+      console.log("Page memory cache cleared successfully");
+    } catch (error) {
+      console.error("Error clearing page memory cache:", error);
     }
   }
 
