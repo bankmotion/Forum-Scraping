@@ -8,14 +8,44 @@ import * as https from "https";
 import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
-import { URL } from "url";
+
 import dotenv from "dotenv";
 
-dotenv.config();
+interface UploadTask {
+  url: string;
+  key: string;
+  threadId: string;
+  postId: number;
+  retryCount?: number;
+}
+
+interface UploadStats {
+  total: number;
+  successful: number;
+  failed: number;
+  skipped: number;
+  startTime: number;
+  endTime?: number;
+}
 
 export class S3Service {
-  private s3Client: S3Client;
-  private bucketName: string;
+  s3Client: S3Client;
+  bucketName: string;
+  private uploadQueue: UploadTask[] = [];
+  private activeUploads: Set<string> = new Set();
+  private uploadStats: UploadStats = {
+    total: 0,
+    successful: 0,
+    failed: 0,
+    skipped: 0,
+    startTime: 0
+  };
+
+  // Configuration for concurrent uploads
+  private readonly MAX_CONCURRENT_UPLOADS = parseInt(process.env.MAX_CONCURRENT_UPLOADS || "64");
+  private readonly MAX_RETRIES = 3;
+  private readonly RETRY_DELAY = 2000; // 2 seconds
+  private readonly DOWNLOAD_TIMEOUT = 30000; // 30 seconds
 
   constructor() {
     this.bucketName = process.env.S3_BUCKET_NAME || "";
@@ -29,6 +59,8 @@ export class S3Service {
     // Create a custom HTTPS agent that ignores SSL certificate errors
     const httpsAgent = new https.Agent({
       rejectUnauthorized: false,
+      keepAlive: true,
+      maxSockets: this.MAX_CONCURRENT_UPLOADS * 2, // Allow more connections
     });
 
     this.s3Client = new S3Client({
@@ -40,8 +72,9 @@ export class S3Service {
       },
       forcePathStyle: true, // Required for Wasabi
       requestHandler: {
-        httpsAgent: httpsAgent, // Use custom agent for S3 requests
+        httpsAgent: httpsAgent,
       },
+      maxAttempts: 3, // AWS SDK retry attempts
     });
   }
 
@@ -79,23 +112,165 @@ export class S3Service {
     }
   }
 
-  private async downloadFile(url: string): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const parsedUrl = new URL(url);
+  /**
+   * Upload multiple media URLs concurrently with queue management
+   */
+  async uploadMediaUrls(
+    medias: string[],
+    threadId: string,
+    postId: number
+  ): Promise<string[]> {
+    console.log(`Starting concurrent upload of ${medias.length} media files for post ${postId}`);
+    
+    // Reset stats
+    this.uploadStats = {
+      total: medias.length,
+      successful: 0,
+      failed: 0,
+      skipped: 0,
+      startTime: Date.now()
+    };
 
-      // Create a custom agent that ignores SSL certificate errors
-      const agent = new https.Agent({
-        rejectUnauthorized: false,
-        timeout: 30000,
+    // Filter and prepare upload tasks
+    const uploadTasks: UploadTask[] = [];
+    for (const mediaUrl of medias) {
+      if (this.isImageOrVideo(mediaUrl)) {
+        const key = this.generateKey(mediaUrl, threadId, postId);
+        uploadTasks.push({
+          url: mediaUrl,
+          key,
+          threadId,
+          postId,
+          retryCount: 0
+        });
+      } else {
+        this.uploadStats.skipped++;
+      }
+    }
+
+    // Process uploads concurrently
+    const uploadedUrls = await this.processConcurrentUploads(uploadTasks);
+    
+    // Log final stats
+    this.uploadStats.endTime = Date.now();
+    const duration = this.uploadStats.endTime - this.uploadStats.startTime;
+    const rate = this.uploadStats.successful / (duration / 1000);
+    
+    console.log(`Upload completed: ${this.uploadStats.successful}/${this.uploadStats.total} successful, ${this.uploadStats.failed} failed, ${this.uploadStats.skipped} skipped`);
+    console.log(`Upload rate: ${rate.toFixed(2)} files/second, Duration: ${(duration/1000).toFixed(2)}s`);
+
+    return uploadedUrls;
+  }
+
+  /**
+   * Process uploads concurrently with proper queue management
+   */
+  private async processConcurrentUploads(tasks: UploadTask[]): Promise<string[]> {
+    const results: string[] = [];
+    const promises: Promise<void>[] = [];
+
+    // Process tasks in batches
+    for (let i = 0; i < tasks.length; i += this.MAX_CONCURRENT_UPLOADS) {
+      const batch = tasks.slice(i, i + this.MAX_CONCURRENT_UPLOADS);
+      
+      const batchPromises = batch.map(async (task) => {
+        try {
+          const result = await this.processUploadTask(task);
+          if (result) {
+            results.push(result);
+            this.uploadStats.successful++;
+          } else {
+            this.uploadStats.failed++;
+          }
+        } catch (error) {
+          console.error(`Failed to process upload task for ${task.url}:`, error);
+          this.uploadStats.failed++;
+        }
       });
 
-      const options: any = {
-        agent: parsedUrl.protocol === "https:" ? agent : undefined,
-        timeout: 30000,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      promises.push(...batchPromises);
+      
+      // Add small delay between batches to prevent overwhelming the system
+      if (i + this.MAX_CONCURRENT_UPLOADS < tasks.length) {
+        await this.delay(100);
+      }
+    }
+
+    await Promise.allSettled(promises);
+    return results;
+  }
+
+  /**
+   * Process individual upload task with retry logic
+   */
+  private async processUploadTask(task: UploadTask): Promise<string | null> {
+    const taskId = `${task.threadId}-${task.postId}-${task.key}`;
+    
+    try {
+      // Check if already processing this task
+      if (this.activeUploads.has(taskId)) {
+        console.log(`Task ${taskId} already in progress, skipping`);
+        return null;
+      }
+
+      this.activeUploads.add(taskId);
+
+      // Download and upload
+      const fileBuffer = await this.downloadFile(task.url);
+      const contentType = this.getContentType(task.url);
+
+      const uploadCommand = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: task.key,
+        Body: fileBuffer,
+        ContentType: contentType,
+        Metadata: {
+          "original-url": task.url,
+          "upload-timestamp": new Date().toISOString(),
+          "thread-id": task.threadId,
+          "post-id": task.postId.toString(),
         },
+      });
+
+      await this.s3Client.send(uploadCommand);
+
+      const s3Url = `https://${this.bucketName}.s3.${process.env.S3_REGION}.wasabisys.com/${task.key}`;
+      
+      return s3Url;
+
+    } catch (error) {
+      console.error(`Upload failed for ${task.url}:`, error);
+      
+      // Retry logic
+      if (task.retryCount! < this.MAX_RETRIES) {
+        task.retryCount!++;
+        console.log(`Retrying upload for ${task.url} (attempt ${task.retryCount})`);
+        
+        await this.delay(this.RETRY_DELAY * task.retryCount!);
+        return this.processUploadTask(task);
+      }
+      
+      return null;
+    } finally {
+      this.activeUploads.delete(taskId);
+    }
+  }
+
+  /**
+   * Enhanced download with better error handling and timeout
+   */
+  public async downloadFile(url: string): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const parsedUrl = new URL(url);
+      
+      const options = {
+        timeout: this.DOWNLOAD_TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Encoding': 'gzip, deflate',
+          'Connection': 'keep-alive'
+        }
       };
 
       const request =
@@ -107,10 +282,14 @@ export class S3Service {
               this.handleResponse(response, resolve, reject);
             });
 
-      request.on("error", reject);
-      request.setTimeout(30000, () => {
+      request.on("error", (error) => {
+        console.error(`Download error for ${url}:`, error);
+        reject(error);
+      });
+      
+      request.setTimeout(this.DOWNLOAD_TIMEOUT, () => {
         request.destroy();
-        reject(new Error("Download timeout"));
+        reject(new Error(`Download timeout for ${url}`));
       });
     });
   }
@@ -131,48 +310,10 @@ export class S3Service {
     response.on("error", reject);
   }
 
-  private getContentType(url: string): string {
-    const extension = url.split(".").pop()?.toLowerCase();
-
-    switch (extension) {
-      case "jpg":
-      case "jpeg":
-        return "image/jpeg";
-      case "png":
-        return "image/png";
-      case "gif":
-        return "image/gif";
-      case "webp":
-        return "image/webp";
-      case "mp4":
-        return "video/mp4";
-      case "webm":
-        return "video/webm";
-      case "mov":
-        return "video/quicktime";
-      case "avi":
-        return "video/x-msvideo";
-      default:
-        return "application/octet-stream";
-    }
-  }
-
-  private generateKey(
-    originalUrl: string,
-    threadId: string,
-    postId: number
-  ): string {
-    const url = new URL(originalUrl);
-    const pathParts = url.pathname.split("/");
-    const filename = pathParts[pathParts.length - 1] || "media";
-    const extension = filename.split(".").pop() || "jpg";
-
-    // Generate unique key: forum-media/threadId/postId/timestamp-filename
-    const timestamp = Date.now();
-    return `forum-media/${threadId}/${postId}/${timestamp}-${filename}`;
-  }
-
-  private isImageOrVideo(url: string): boolean {
+  /**
+   * Check if URL is an image or video (public method)
+   */
+  isImageOrVideo(url: string): boolean {
     const extension = url.split(".").pop()?.toLowerCase();
 
     const imageExtensions = [
@@ -205,40 +346,74 @@ export class S3Service {
     );
   }
 
-  async uploadMediaUrls(
-    medias: string[],
+  /**
+   * Generate S3 key (public method)
+   */
+  generateKey(
+    originalUrl: string,
     threadId: string,
     postId: number
-  ): Promise<string[]> {
-    const uploadedUrls: string[] = [];
-    let skippedCount = 0;
+  ): string {
+    const url = new URL(originalUrl);
+    const pathParts = url.pathname.split("/");
+    const filename = pathParts[pathParts.length - 1] || "media";
+    const extension = filename.split(".").pop() || "jpg";
 
-    for (const mediaUrl of medias) {
-      try {
-        // Check if the file is an image or video
-        if (!this.isImageOrVideo(mediaUrl)) {
-          skippedCount++;
-          continue;
-        }
+    // Generate unique key: forum-media/threadId/postId/timestamp-filename
+    const timestamp = Date.now();
+    return `forum-media/${threadId}/${postId}/${timestamp}-${filename}`;
+  }
 
-        const key = this.generateKey(mediaUrl, threadId, postId);
-        const uploadedMediaUrl = await this.uploadFromUrl(mediaUrl, key);
-        if (uploadedMediaUrl) {
-          uploadedUrls.push(uploadedMediaUrl);
-        }
+  /**
+   * Get content type (public method)
+   */
+  getContentType(url: string): string {
+    const extension = url.split(".").pop()?.toLowerCase();
 
-        // Add delay between downloads to avoid rate limiting
-        await this.delay(1000);
-      } catch (error) {
-        console.error(`Failed to download ${mediaUrl}:`, error);
-        // Keep original URL if download fails
-        uploadedUrls.push(mediaUrl);
-      }
+    switch (extension) {
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      case "png":
+        return "image/png";
+      case "gif":
+        return "image/gif";
+      case "webp":
+        return "image/webp";
+      case "mp4":
+        return "video/mp4";
+      case "webm":
+        return "video/webm";
+      case "mov":
+        return "video/quicktime";
+      case "avi":
+        return "video/x-msvideo";
+      default:
+        return "application/octet-stream";
     }
-    return uploadedUrls;
   }
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Get current upload statistics
+   */
+  getUploadStats(): UploadStats {
+    return { ...this.uploadStats };
+  }
+
+  /**
+   * Reset upload statistics
+   */
+  resetUploadStats(): void {
+    this.uploadStats = {
+      total: 0,
+      successful: 0,
+      failed: 0,
+      skipped: 0,
+      startTime: 0
+    };
   }
 }

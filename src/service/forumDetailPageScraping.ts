@@ -16,6 +16,7 @@ import {
   createBrowserConfig,
   delay
 } from "../utils";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 dotenv.config();
 
 interface PostData {
@@ -23,6 +24,13 @@ interface PostData {
   author: string;
   content: string;
   medias: string[];
+}
+
+interface MediaTask {
+  url: string;
+  postId: number;
+  threadId: string;
+  key: string;
 }
 
 interface LoginCredentials {
@@ -42,6 +50,15 @@ class ForumDetailPageScraper {
   private pagesScraped: number = 0;
   private readonly PAGES_BEFORE_RESTART: number = 100;
   private tempDir: string = "";
+  
+  // Batch processing configuration
+  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "30");
+  private readonly DOWNLOAD_BATCH_SIZE = parseInt(process.env.DOWNLOAD_BATCH_SIZE || "30");
+  private readonly UPLOAD_BATCH_SIZE = parseInt(process.env.UPLOAD_BATCH_SIZE || "30");
+
+  // Node distribution configuration
+  private readonly NODE_INDEX = parseInt(process.env.NODE_INDEX || "0");
+  private readonly NODE_COUNT = parseInt(process.env.NODE_COUNT || "1");
 
   constructor() {
     this.cookiesPath = path.join(__dirname, "../../cookies.json");
@@ -51,6 +68,13 @@ class ForumDetailPageScraper {
     };
     this.mode = process.env.NODE_ENV || "";
     this.s3Service = new S3Service();
+    
+    // Validate node configuration
+    if (this.NODE_INDEX < 0 || this.NODE_INDEX >= this.NODE_COUNT) {
+      throw new Error(`Invalid NODE_INDEX: ${this.NODE_INDEX}. Must be between 0 and ${this.NODE_COUNT - 1}`);
+    }
+    
+    console.log(`🚀 Starting scraper instance: Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}`);
   }
 
   private async initializeBrowser(): Promise<{
@@ -302,10 +326,13 @@ class ForumDetailPageScraper {
     return await this.login();
   }
 
+  /**
+   * Get threads needing update - filtered by node distribution
+   */
   async getThreadsNeedingUpdate(): Promise<ForumThread[]> {
     try {
-      // Get threads where detailPageUpdateDate is null OR lastReplyDate > detailPageUpdateDate
-      const threads = await ForumThread.findAll({
+      // Get all threads where detailPageUpdateDate is null OR lastReplyDate > detailPageUpdateDate
+      const allThreads = await ForumThread.findAll({
         where: sequelize.or(
           { detailPageUpdateDate: null },
           sequelize.where(
@@ -317,10 +344,18 @@ class ForumDetailPageScraper {
         order: [["lastReplyDate", "DESC"]],
       });
 
-      console.log(
-        `Found ${threads.length} threads needing detail page updates`
-      );
-      return threads;
+      console.log(`Found ${allThreads.length} total threads needing detail page updates`);
+
+      // Filter threads based on node distribution using modulo operation
+      const nodeThreads = allThreads.filter(thread => {
+        // Convert threadId to number for modulo operation
+        const threadIdNum = parseInt(thread.threadId);
+        return threadIdNum % this.NODE_COUNT === this.NODE_INDEX;
+      });
+
+      console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Processing ${nodeThreads.length} threads (${((nodeThreads.length / allThreads.length) * 100).toFixed(1)}% of total)`);
+
+      return nodeThreads;
     } catch (error) {
       console.error("Error getting threads needing update:", error);
       return [];
@@ -376,7 +411,7 @@ class ForumDetailPageScraper {
 
         const posts = await this.scrapePagePosts();
 
-        // Save posts to database after each page
+        // Save posts to database with batch processing
         await this.savePostsToDatabase(thread.threadId, posts);
 
         // Increment pages scraped counter
@@ -435,6 +470,9 @@ class ForumDetailPageScraper {
     }
   }
 
+  /**
+   * Scrape all posts from current page and collect all media URLs
+   */
   private async scrapePagePosts(): Promise<PostData[]> {
     try {
       const posts = await this.page!.evaluate(() => {
@@ -611,7 +649,175 @@ class ForumDetailPageScraper {
     }
   }
 
-  // Update savePostsToDatabase method to upload media to S3
+  /**
+   * Process all media from a page in batches - ONLY for new posts
+   */
+  private async processPageMediaBatch(
+    posts: PostData[],
+    threadId: string,
+    existingPostIds: Set<number>
+  ): Promise<Map<number, string[]>> {
+    console.log(`Processing media for ${posts.length} posts in thread ${threadId}`);
+    
+    // Filter out posts that already exist in database
+    const newPosts = posts.filter(post => !existingPostIds.has(post.postId));
+    
+    if (newPosts.length === 0) {
+      console.log(`No new posts to process for thread ${threadId}`);
+      return new Map();
+    }
+
+    console.log(`Found ${newPosts.length} new posts (${posts.length - newPosts.length} already exist)`);
+    
+    // Collect all media tasks from ONLY new posts
+    const allMediaTasks: MediaTask[] = [];
+    const postMediaMap = new Map<number, string[]>();
+
+    for (const post of newPosts) {
+      const processedMedias: string[] = [];
+      
+      for (const mediaUrl of post.medias) {
+        if (this.s3Service.isImageOrVideo(mediaUrl)) {
+          const key = this.s3Service.generateKey(mediaUrl, threadId, post.postId);
+          allMediaTasks.push({
+            url: mediaUrl,
+            postId: post.postId,
+            threadId: threadId,
+            key: key
+          });
+          processedMedias.push(mediaUrl); // Keep original URL for now
+        }
+      }
+      
+      postMediaMap.set(post.postId, processedMedias);
+    }
+
+    console.log(`Found ${allMediaTasks.length} media files to process from ${newPosts.length} new posts`);
+
+    if (allMediaTasks.length === 0) {
+      return postMediaMap;
+    }
+
+    // Process downloads in batches
+    console.log(`Starting batch download process (${this.DOWNLOAD_BATCH_SIZE} files per batch)...`);
+    const downloadResults = await this.processDownloadBatches(allMediaTasks);
+    
+    // Process uploads in batches
+    console.log(`Starting batch upload process (${this.UPLOAD_BATCH_SIZE} files per batch)...`);
+    const uploadResults = await this.processUploadBatches(downloadResults, allMediaTasks);
+
+    // Update post media map with S3 URLs
+    for (const [postId, originalUrls] of postMediaMap.entries()) {
+      const updatedUrls: string[] = [];
+      
+      for (const originalUrl of originalUrls) {
+        const uploadResult = uploadResults.get(originalUrl);
+        if (uploadResult && uploadResult.success) {
+          updatedUrls.push(uploadResult.s3Url!);
+        } else {
+          // Keep original URL if upload failed
+          updatedUrls.push(originalUrl);
+        }
+      }
+      
+      postMediaMap.set(postId, updatedUrls);
+    }
+
+    return postMediaMap;
+  }
+
+  /**
+   * Process downloads in batches
+   */
+  private async processDownloadBatches(mediaTasks: MediaTask[]): Promise<Map<string, Buffer>> {
+    const downloadResults = new Map<string, Buffer>();
+    
+    for (let i = 0; i < mediaTasks.length; i += this.DOWNLOAD_BATCH_SIZE) {
+      const batch = mediaTasks.slice(i, i + this.DOWNLOAD_BATCH_SIZE);
+      console.log(`Downloading batch ${Math.floor(i / this.DOWNLOAD_BATCH_SIZE) + 1}/${Math.ceil(mediaTasks.length / this.DOWNLOAD_BATCH_SIZE)} (${batch.length} files)`);
+      
+      const batchPromises = batch.map(async (task) => {
+        try {
+          const buffer = await this.s3Service.downloadFile(task.url);
+          downloadResults.set(task.url, buffer);
+          console.log(`✓ Downloaded: ${task.url}`);
+        } catch (error) {
+          console.error(`✗ Download failed: ${task.url}`, error);
+        }
+      });
+
+      await Promise.allSettled(batchPromises);
+      
+      // Small delay between batches
+      if (i + this.DOWNLOAD_BATCH_SIZE < mediaTasks.length) {
+        await this.delay(500);
+      }
+    }
+
+    console.log(`Download completed: ${downloadResults.size}/${mediaTasks.length} files downloaded successfully`);
+    return downloadResults;
+  }
+
+  /**
+   * Process uploads in batches
+   */
+  private async processUploadBatches(
+    downloadResults: Map<string, Buffer>,
+    mediaTasks: MediaTask[]
+  ): Promise<Map<string, { success: boolean; s3Url?: string }>> {
+    const uploadResults = new Map<string, { success: boolean; s3Url?: string }>();
+    
+    // Filter tasks that have successful downloads
+    const successfulTasks = mediaTasks.filter(task => downloadResults.has(task.url));
+    
+    for (let i = 0; i < successfulTasks.length; i += this.UPLOAD_BATCH_SIZE) {
+      const batch = successfulTasks.slice(i, i + this.UPLOAD_BATCH_SIZE);
+      console.log(`Uploading batch ${Math.floor(i / this.UPLOAD_BATCH_SIZE) + 1}/${Math.ceil(successfulTasks.length / this.UPLOAD_BATCH_SIZE)} (${batch.length} files)`);
+      
+      const batchPromises = batch.map(async (task) => {
+        try {
+          const buffer = downloadResults.get(task.url)!;
+          const contentType = this.s3Service.getContentType(task.url);
+          
+          const uploadCommand = new PutObjectCommand({
+            Bucket: this.s3Service.bucketName,
+            Key: task.key,
+            Body: buffer,
+            ContentType: contentType,
+            Metadata: {
+              "original-url": task.url,
+              "upload-timestamp": new Date().toISOString(),
+              "thread-id": task.threadId,
+              "post-id": task.postId.toString(),
+            },
+          });
+
+          await this.s3Service.s3Client.send(uploadCommand);
+          
+          const s3Url = `https://${this.s3Service.bucketName}.s3.${process.env.S3_REGION}.wasabisys.com/${task.key}`;
+          uploadResults.set(task.url, { success: true, s3Url });
+          console.log(`✓ Uploaded: ${task.url} -> ${s3Url}`);
+        } catch (error) {
+          console.error(`✗ Upload failed: ${task.url}`, error);
+          uploadResults.set(task.url, { success: false });
+        }
+      });
+
+      await Promise.allSettled(batchPromises);
+      
+      // Small delay between batches
+      if (i + this.UPLOAD_BATCH_SIZE < successfulTasks.length) {
+        await this.delay(500);
+      }
+    }
+
+    console.log(`Upload completed: ${Array.from(uploadResults.values()).filter(r => r.success).length}/${successfulTasks.length} files uploaded successfully`);
+    return uploadResults;
+  }
+
+  /**
+   * Updated savePostsToDatabase method with proper filtering
+   */
   private async savePostsToDatabase(
     threadId: string,
     posts: PostData[]
@@ -627,38 +833,26 @@ class ForumDetailPageScraper {
       const existingPostIds = new Set(existingPosts.map((post) => post.postId));
 
       console.log(
-        `---------------Found ${existingPostIds.size} existing posts for thread ${threadId}`
+        `Found ${existingPostIds.size} existing posts for thread ${threadId}`
       );
 
-      for (const postData of posts) {
-        // Check if post already exists
-        if (existingPostIds.has(postData.postId)) {
-          continue;
-        }
+      // Process all media in batches - ONLY for new posts
+      const postMediaMap = await this.processPageMediaBatch(posts, threadId, existingPostIds);
 
-        // Upload media to S3 and get new URLs
-        let processedMedias: string[] = [];
+      // Get new posts for database saving
+      const newPosts = posts.filter(post => !existingPostIds.has(post.postId));
+      
+      if (newPosts.length === 0) {
+        console.log(`No new posts to process for thread ${threadId}`);
+        return;
+      }
 
-        if (postData.medias.length > 0) {
-          try {
-            processedMedias = await this.s3Service.uploadMediaUrls(
-              postData.medias,
-              threadId,
-              postData.postId
-            );
-            if (processedMedias.length > 0) {
-              console.log(
-                `Successfully uploaded media for post ${postData.postId}, processedMedias: ${processedMedias}`
-              );
-            }
-          } catch (error) {
-            console.error(
-              `Error uploading media for post ${postData.postId}:`,
-              error
-            );
-          }
-        }
+      console.log(`Processing ${newPosts.length} new posts for thread ${threadId}`);
 
+      // Save all NEW posts to database after batch processing is complete
+      const dbPromises = newPosts.map(async (postData) => {
+        const processedMedias = postMediaMap.get(postData.postId) || [];
+        
         if (processedMedias.length > 0) {
           await ForumPost.upsert({
             postId: postData.postId,
@@ -668,10 +862,15 @@ class ForumDetailPageScraper {
             medias: JSON.stringify(processedMedias),
           });
           console.log(
-            `Successfully saved post ${postData.postId} to database, processedMedias length: ${processedMedias.length}`
+            `✓ Saved post ${postData.postId} with ${processedMedias.length} media files`
           );
         }
-      }
+      });
+
+      await Promise.allSettled(dbPromises);
+      
+      console.log(`✓ Completed processing ${newPosts.length} posts for thread ${threadId}`);
+
     } catch (error) {
       console.error("Error saving posts to database:", error);
     }
@@ -771,18 +970,27 @@ class ForumDetailPageScraper {
 
       const threadsToUpdate = await this.getThreadsNeedingUpdate();
 
-      console.log(`Processing ${threadsToUpdate.length} threads`);
+      console.log(`Node ${this.NODE_INDEX}: Processing ${threadsToUpdate.length} threads`);
 
+      if (threadsToUpdate.length === 0) {
+        console.log(`Node ${this.NODE_INDEX}: No threads to process`);
+        return;
+      }
+
+      let processedCount = 0;
       for (const thread of threadsToUpdate) {
+        processedCount++;
+        console.log(`Node ${this.NODE_INDEX}: Processing thread ${processedCount}/${threadsToUpdate.length} - ${thread.title}`);
+        
         await this.scrapeThreadDetailPage(thread);
 
         // Add delay between threads
         await this.delay(3000);
       }
 
-      console.log("Detail page scraping completed");
+      console.log(`Node ${this.NODE_INDEX}: Detail page scraping completed - processed ${processedCount} threads`);
     } catch (error) {
-      console.error("Error in detail page scraping:", error);
+      console.error(`Node ${this.NODE_INDEX}: Error in detail page scraping:`, error);
     } finally {
       await this.close();
     }
