@@ -14,7 +14,7 @@ import {
   getMemoryUsage,
   clearBrowserCache,
   createBrowserConfig,
-  delay
+  delay,
 } from "../utils";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 dotenv.config();
@@ -50,11 +50,15 @@ class ForumDetailPageScraper {
   private pagesScraped: number = 0;
   private readonly PAGES_BEFORE_RESTART: number = 100;
   private tempDir: string = "";
-  
+
   // Batch processing configuration
   private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "30");
-  private readonly DOWNLOAD_BATCH_SIZE = parseInt(process.env.DOWNLOAD_BATCH_SIZE || "30");
-  private readonly UPLOAD_BATCH_SIZE = parseInt(process.env.UPLOAD_BATCH_SIZE || "30");
+  private readonly DOWNLOAD_BATCH_SIZE = parseInt(
+    process.env.DOWNLOAD_BATCH_SIZE || "30"
+  );
+  private readonly UPLOAD_BATCH_SIZE = parseInt(
+    process.env.UPLOAD_BATCH_SIZE || "30"
+  );
 
   // Node distribution configuration
   private readonly NODE_INDEX = parseInt(process.env.NODE_INDEX || "0");
@@ -68,13 +72,21 @@ class ForumDetailPageScraper {
     };
     this.mode = process.env.NODE_ENV || "";
     this.s3Service = new S3Service();
-    
+
     // Validate node configuration
     if (this.NODE_INDEX < 0 || this.NODE_INDEX >= this.NODE_COUNT) {
-      throw new Error(`Invalid NODE_INDEX: ${this.NODE_INDEX}. Must be between 0 and ${this.NODE_COUNT - 1}`);
+      throw new Error(
+        `Invalid NODE_INDEX: ${this.NODE_INDEX}. Must be between 0 and ${
+          this.NODE_COUNT - 1
+        }`
+      );
     }
-    
-    console.log(`🚀 Starting scraper instance: Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}`);
+
+    console.log(
+      `🚀 Starting scraper instance: Node ${this.NODE_INDEX}/${
+        this.NODE_COUNT - 1
+      }`
+    );
   }
 
   private async initializeBrowser(): Promise<{
@@ -83,7 +95,7 @@ class ForumDetailPageScraper {
   }> {
     const tempDir = createTempUserDataDir();
     const browserConfig = createBrowserConfig(this.mode, tempDir);
-    
+
     const browser = await puppeteer.launch(browserConfig);
     console.log("Browser initialized");
 
@@ -344,16 +356,24 @@ class ForumDetailPageScraper {
         order: [["lastReplyDate", "DESC"]],
       });
 
-      console.log(`Found ${allThreads.length} total threads needing detail page updates`);
+      console.log(
+        `Found ${allThreads.length} total threads needing detail page updates`
+      );
 
       // Filter threads based on node distribution using modulo operation
-      const nodeThreads = allThreads.filter(thread => {
+      const nodeThreads = allThreads.filter((thread) => {
         // Convert threadId to number for modulo operation
         const threadIdNum = parseInt(thread.threadId);
         return threadIdNum % this.NODE_COUNT === this.NODE_INDEX;
       });
 
-      console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Processing ${nodeThreads.length} threads (${((nodeThreads.length / allThreads.length) * 100).toFixed(1)}% of total)`);
+      console.log(
+        `Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Processing ${
+          nodeThreads.length
+        } threads (${((nodeThreads.length / allThreads.length) * 100).toFixed(
+          1
+        )}% of total)`
+      );
 
       return nodeThreads;
     } catch (error) {
@@ -650,66 +670,74 @@ class ForumDetailPageScraper {
   }
 
   /**
-   * Process all media from a page in batches - ONLY for new posts
+   * Process all media from a page in streaming batches - ONLY for new posts
+   * Downloads a batch, uploads immediately, clears memory, then repeats
    */
   private async processPageMediaBatch(
     posts: PostData[],
     threadId: string,
     existingPostIds: Set<number>
   ): Promise<Map<number, string[]>> {
-    console.log(`Processing media for ${posts.length} posts in thread ${threadId}`);
-    
+    console.log(
+      `Processing media for ${posts.length} posts in thread ${threadId}`
+    );
+
     // Filter out posts that already exist in database
-    const newPosts = posts.filter(post => !existingPostIds.has(post.postId));
-    
+    const newPosts = posts.filter((post) => !existingPostIds.has(post.postId));
+
     if (newPosts.length === 0) {
       console.log(`No new posts to process for thread ${threadId}`);
       return new Map();
     }
 
-    console.log(`Found ${newPosts.length} new posts (${posts.length - newPosts.length} already exist)`);
-    
+    console.log(
+      `Found ${newPosts.length} new posts (${
+        posts.length - newPosts.length
+      } already exist)`
+    );
+
     // Collect all media tasks from ONLY new posts
     const allMediaTasks: MediaTask[] = [];
     const postMediaMap = new Map<number, string[]>();
 
     for (const post of newPosts) {
       const processedMedias: string[] = [];
-      
+
       for (const mediaUrl of post.medias) {
         if (this.s3Service.isImageOrVideo(mediaUrl)) {
-          const key = this.s3Service.generateKey(mediaUrl, threadId, post.postId);
+          const key = this.s3Service.generateKey(
+            mediaUrl,
+            threadId,
+            post.postId
+          );
           allMediaTasks.push({
             url: mediaUrl,
             postId: post.postId,
             threadId: threadId,
-            key: key
+            key: key,
           });
           processedMedias.push(mediaUrl); // Keep original URL for now
         }
       }
-      
+
       postMediaMap.set(post.postId, processedMedias);
     }
 
-    console.log(`Found ${allMediaTasks.length} media files to process from ${newPosts.length} new posts`);
+    console.log(
+      `Found ${allMediaTasks.length} media files to process from ${newPosts.length} new posts`
+    );
 
     if (allMediaTasks.length === 0) {
       return postMediaMap;
     }
 
-    // Process downloads in batches
-    console.log(`Starting batch download process (${this.DOWNLOAD_BATCH_SIZE} files per batch)...`);
-    const downloadResults = await this.processDownloadBatches(allMediaTasks);
-    
-    // Process uploads in batches
-    console.log(`Starting batch upload process (${this.UPLOAD_BATCH_SIZE} files per batch)...`);
-    const uploadResults = await this.processUploadBatches(downloadResults, allMediaTasks);
+    // Process in streaming batches: download -> upload -> clear memory -> repeat
+    const uploadResults = await this.processStreamingBatches(allMediaTasks);
 
     // Update post media map with S3 URLs
     for (const [postId, originalUrls] of postMediaMap.entries()) {
       const updatedUrls: string[] = [];
-      
+
       for (const originalUrl of originalUrls) {
         const uploadResult = uploadResults.get(originalUrl);
         if (uploadResult && uploadResult.success) {
@@ -719,7 +747,7 @@ class ForumDetailPageScraper {
           updatedUrls.push(originalUrl);
         }
       }
-      
+
       postMediaMap.set(postId, updatedUrls);
     }
 
@@ -727,16 +755,39 @@ class ForumDetailPageScraper {
   }
 
   /**
-   * Process downloads in batches
+   * Process media in streaming batches to prevent memory overflow
+   * Downloads a batch, uploads immediately, clears memory, then repeats
    */
-  private async processDownloadBatches(mediaTasks: MediaTask[]): Promise<Map<string, Buffer>> {
-    const downloadResults = new Map<string, Buffer>();
-    
-    for (let i = 0; i < mediaTasks.length; i += this.DOWNLOAD_BATCH_SIZE) {
-      const batch = mediaTasks.slice(i, i + this.DOWNLOAD_BATCH_SIZE);
-      console.log(`Downloading batch ${Math.floor(i / this.DOWNLOAD_BATCH_SIZE) + 1}/${Math.ceil(mediaTasks.length / this.DOWNLOAD_BATCH_SIZE)} (${batch.length} files)`);
-      
-      const batchPromises = batch.map(async (task) => {
+  private async processStreamingBatches(
+    mediaTasks: MediaTask[]
+  ): Promise<Map<string, { success: boolean; s3Url?: string }>> {
+    const uploadResults = new Map<
+      string,
+      { success: boolean; s3Url?: string }
+    >();
+
+    // Use the smaller of download/upload batch sizes to minimize memory usage
+    const streamingBatchSize = Math.min(
+      this.DOWNLOAD_BATCH_SIZE,
+      this.UPLOAD_BATCH_SIZE
+    );
+
+    console.log(
+      `Starting streaming batch process (${streamingBatchSize} files per batch)...`
+    );
+
+    for (let i = 0; i < mediaTasks.length; i += streamingBatchSize) {
+      const batch = mediaTasks.slice(i, i + streamingBatchSize);
+      const batchNumber = Math.floor(i / streamingBatchSize) + 1;
+      const totalBatches = Math.ceil(mediaTasks.length / streamingBatchSize);
+
+      console.log(
+        `Processing streaming batch ${batchNumber}/${totalBatches} (${batch.length} files)`
+      );
+
+      // Step 1: Download batch
+      const downloadResults = new Map<string, Buffer>();
+      const downloadPromises = batch.map(async (task) => {
         try {
           const buffer = await this.s3Service.downloadFile(task.url);
           downloadResults.set(task.url, buffer);
@@ -746,39 +797,20 @@ class ForumDetailPageScraper {
         }
       });
 
-      await Promise.allSettled(batchPromises);
-      
-      // Small delay between batches
-      if (i + this.DOWNLOAD_BATCH_SIZE < mediaTasks.length) {
-        await this.delay(500);
-      }
-    }
+      await Promise.allSettled(downloadPromises);
 
-    console.log(`Download completed: ${downloadResults.size}/${mediaTasks.length} files downloaded successfully`);
-    return downloadResults;
-  }
-
-  /**
-   * Process uploads in batches
-   */
-  private async processUploadBatches(
-    downloadResults: Map<string, Buffer>,
-    mediaTasks: MediaTask[]
-  ): Promise<Map<string, { success: boolean; s3Url?: string }>> {
-    const uploadResults = new Map<string, { success: boolean; s3Url?: string }>();
-    
-    // Filter tasks that have successful downloads
-    const successfulTasks = mediaTasks.filter(task => downloadResults.has(task.url));
-    
-    for (let i = 0; i < successfulTasks.length; i += this.UPLOAD_BATCH_SIZE) {
-      const batch = successfulTasks.slice(i, i + this.UPLOAD_BATCH_SIZE);
-      console.log(`Uploading batch ${Math.floor(i / this.UPLOAD_BATCH_SIZE) + 1}/${Math.ceil(successfulTasks.length / this.UPLOAD_BATCH_SIZE)} (${batch.length} files)`);
-      
-      const batchPromises = batch.map(async (task) => {
+      // Step 2: Upload batch immediately
+      const uploadPromises = batch.map(async (task) => {
         try {
-          const buffer = downloadResults.get(task.url)!;
+          const buffer = downloadResults.get(task.url);
+          if (!buffer) {
+            console.error(`✗ No buffer found for: ${task.url}`);
+            uploadResults.set(task.url, { success: false });
+            return;
+          }
+
           const contentType = this.s3Service.getContentType(task.url);
-          
+
           const uploadCommand = new PutObjectCommand({
             Bucket: this.s3Service.bucketName,
             Key: task.key,
@@ -793,7 +825,7 @@ class ForumDetailPageScraper {
           });
 
           await this.s3Service.s3Client.send(uploadCommand);
-          
+
           const s3Url = `https://${this.s3Service.bucketName}.s3.${process.env.S3_REGION}.wasabisys.com/${task.key}`;
           uploadResults.set(task.url, { success: true, s3Url });
           console.log(`✓ Uploaded: ${task.url} -> ${s3Url}`);
@@ -803,15 +835,33 @@ class ForumDetailPageScraper {
         }
       });
 
-      await Promise.allSettled(batchPromises);
-      
-      // Small delay between batches
-      if (i + this.UPLOAD_BATCH_SIZE < successfulTasks.length) {
-        await this.delay(500);
+      await Promise.allSettled(uploadPromises);
+
+      // Step 3: Clear memory immediately after upload
+      downloadResults.clear();
+
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc();
+      }
+
+      console.log(
+        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared`
+      );
+
+      // Small delay between batches to allow memory cleanup
+      if (i + streamingBatchSize < mediaTasks.length) {
+        await this.delay(1000);
       }
     }
 
-    console.log(`Upload completed: ${Array.from(uploadResults.values()).filter(r => r.success).length}/${successfulTasks.length} files uploaded successfully`);
+    const successCount = Array.from(uploadResults.values()).filter(
+      (r) => r.success
+    ).length;
+    console.log(
+      `Streaming batch process completed: ${successCount}/${mediaTasks.length} files processed successfully`
+    );
+
     return uploadResults;
   }
 
@@ -837,22 +887,30 @@ class ForumDetailPageScraper {
       );
 
       // Process all media in batches - ONLY for new posts
-      const postMediaMap = await this.processPageMediaBatch(posts, threadId, existingPostIds);
+      const postMediaMap = await this.processPageMediaBatch(
+        posts,
+        threadId,
+        existingPostIds
+      );
 
       // Get new posts for database saving
-      const newPosts = posts.filter(post => !existingPostIds.has(post.postId));
-      
+      const newPosts = posts.filter(
+        (post) => !existingPostIds.has(post.postId)
+      );
+
       if (newPosts.length === 0) {
         console.log(`No new posts to process for thread ${threadId}`);
         return;
       }
 
-      console.log(`Processing ${newPosts.length} new posts for thread ${threadId}`);
+      console.log(
+        `Processing ${newPosts.length} new posts for thread ${threadId}`
+      );
 
       // Save all NEW posts to database after batch processing is complete
       const dbPromises = newPosts.map(async (postData) => {
         const processedMedias = postMediaMap.get(postData.postId) || [];
-        
+
         if (processedMedias.length > 0) {
           await ForumPost.upsert({
             postId: postData.postId,
@@ -868,9 +926,10 @@ class ForumDetailPageScraper {
       });
 
       await Promise.allSettled(dbPromises);
-      
-      console.log(`✓ Completed processing ${newPosts.length} posts for thread ${threadId}`);
 
+      console.log(
+        `✓ Completed processing ${newPosts.length} posts for thread ${threadId}`
+      );
     } catch (error) {
       console.error("Error saving posts to database:", error);
     }
@@ -921,10 +980,10 @@ class ForumDetailPageScraper {
   async restartBrowser(): Promise<void> {
     try {
       console.log("Restarting browser...");
-      
+
       // Show memory usage before restart
       await getMemoryUsage();
-      
+
       // Close current browser
       if (this.browser) {
         await this.browser.close();
@@ -942,10 +1001,10 @@ class ForumDetailPageScraper {
 
       // Reinitialize browser (this will include cache clearing in production)
       await this.initialize();
-      
+
       // Show memory usage after restart
       await getMemoryUsage();
-      
+
       console.log("Browser restarted successfully");
     } catch (error) {
       console.error("Error restarting browser:", error);
@@ -970,7 +1029,9 @@ class ForumDetailPageScraper {
 
       const threadsToUpdate = await this.getThreadsNeedingUpdate();
 
-      console.log(`Node ${this.NODE_INDEX}: Processing ${threadsToUpdate.length} threads`);
+      console.log(
+        `Node ${this.NODE_INDEX}: Processing ${threadsToUpdate.length} threads`
+      );
 
       if (threadsToUpdate.length === 0) {
         console.log(`Node ${this.NODE_INDEX}: No threads to process`);
@@ -980,17 +1041,24 @@ class ForumDetailPageScraper {
       let processedCount = 0;
       for (const thread of threadsToUpdate) {
         processedCount++;
-        console.log(`Node ${this.NODE_INDEX}: Processing thread ${processedCount}/${threadsToUpdate.length} - ${thread.title}`);
-        
+        console.log(
+          `Node ${this.NODE_INDEX}: Processing thread ${processedCount}/${threadsToUpdate.length} - ${thread.title}`
+        );
+
         await this.scrapeThreadDetailPage(thread);
 
         // Add delay between threads
         await this.delay(3000);
       }
 
-      console.log(`Node ${this.NODE_INDEX}: Detail page scraping completed - processed ${processedCount} threads`);
+      console.log(
+        `Node ${this.NODE_INDEX}: Detail page scraping completed - processed ${processedCount} threads`
+      );
     } catch (error) {
-      console.error(`Node ${this.NODE_INDEX}: Error in detail page scraping:`, error);
+      console.error(
+        `Node ${this.NODE_INDEX}: Error in detail page scraping:`,
+        error
+      );
     } finally {
       await this.close();
     }
