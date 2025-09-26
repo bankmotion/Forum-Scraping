@@ -157,7 +157,6 @@ class ForumDetailPageScraper {
 
       if (cookieButton) {
         await cookieButton.click();
-        await this.delay(1000); // Wait for dialog to close
       }
     } catch (error) {
       console.log(
@@ -455,32 +454,15 @@ class ForumDetailPageScraper {
             await this.restartBrowser();
           }
 
-          // Add delay between pages
-          if (pageNum < totalPages) {
-            await this.delay(2000);
-          }
-
         } catch (error) {
           console.error(`❌ Page ${pageNum} failed to load within 30 seconds: ${pageUrl}`);
           console.error(`Error: ${error}`);
           
           // Skip this page and continue to next page
-          console.log(`⏭️ Skipping page ${pageNum} and continuing to next page...`);
+          console.log(`⏭️    page ${pageNum} failed to load. Restarting browser...`);
+          await this.restartBrowser();
           
           pageNum--;
-          
-          // Check if we need to restart browser even after timeout
-          if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-            console.log(
-              `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
-            );
-            await this.restartBrowser();
-          }
-          
-          // Add delay before trying next page
-          if (pageNum < totalPages) {
-            await this.delay(2000);
-          }
         }
       }
 
