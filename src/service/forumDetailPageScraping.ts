@@ -52,12 +52,12 @@ class ForumDetailPageScraper {
   private tempDir: string = "";
 
   // Batch processing configuration
-  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "30");
+  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "10");
   private readonly DOWNLOAD_BATCH_SIZE = parseInt(
-    process.env.DOWNLOAD_BATCH_SIZE || "30"
+    process.env.DOWNLOAD_BATCH_SIZE || "10"
   );
   private readonly UPLOAD_BATCH_SIZE = parseInt(
-    process.env.UPLOAD_BATCH_SIZE || "30"
+    process.env.UPLOAD_BATCH_SIZE || "10"
   );
 
   // Node distribution configuration
