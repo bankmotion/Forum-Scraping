@@ -29,6 +29,8 @@ class ForumDetailPageScraper {
   private credentials: LoginCredentials;
   private mode: string;
   private s3Service: S3Service;
+  private pagesScraped: number = 0;
+  private readonly PAGES_BEFORE_RESTART: number = 100;
 
   constructor() {
     this.cookiesPath = path.join(__dirname, "../../cookies.json");
@@ -41,13 +43,38 @@ class ForumDetailPageScraper {
   }
 
   async initialize(): Promise<void> {
-    this.browser = await puppeteer.launch({
+    // Configure browser launch options with cache clearing for production
+    const launchOptions: any = {
       headless: this.mode === "production" ? true : false,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
       defaultViewport: { width: 1280, height: 720 },
-    });
+    };
+
+    // Add cache and memory clearing options for production mode
+    if (this.mode === "production") {
+      launchOptions.args.push(
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=TranslateUI",
+        "--disable-ipc-flooding-protection",
+        "--memory-pressure-off",
+        "--max_old_space_size=4096"
+      );
+    }
+
+    this.browser = await puppeteer.launch(launchOptions);
 
     this.page = await this.browser.newPage();
+
+    // Clear cache and cookies for production mode
+    if (this.mode === "production") {
+      await this.clearBrowserCache();
+    }
 
     await this.page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -349,6 +376,15 @@ class ForumDetailPageScraper {
         // Save posts to database after each page
         await this.savePostsToDatabase(thread.threadId, posts);
 
+        // Increment pages scraped counter
+        this.pagesScraped++;
+
+        // Check if we need to restart browser
+        if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
+          console.log(`Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`);
+          await this.restartBrowser();
+        }
+
         // Add delay between pages
         if (pageNum < totalPages) {
           await this.delay(2000);
@@ -644,6 +680,67 @@ class ForumDetailPageScraper {
       );
     } catch (error) {
       console.error("Error saving posts to database:", error);
+    }
+  }
+
+  async clearBrowserCache(): Promise<void> {
+    try {
+      if (!this.page) return;
+
+      console.log("Clearing browser cache and memory...");
+
+      // Clear browser cache
+      const client = await this.page.target().createCDPSession();
+      await client.send('Network.clearBrowserCache');
+      await client.send('Network.clearBrowserCookies');
+      
+      // Clear memory
+      await client.send('Runtime.evaluate', {
+        expression: `
+          if (window.gc) {
+            window.gc();
+          }
+          // Clear any cached data
+          if (window.caches) {
+            caches.keys().then(names => {
+              names.forEach(name => caches.delete(name));
+            });
+          }
+        `
+      });
+
+      // Force garbage collection if available
+      await client.send('HeapProfiler.collectGarbage');
+      
+      await client.detach();
+      
+      console.log("Browser cache and memory cleared successfully");
+    } catch (error) {
+      console.error("Error clearing browser cache:", error);
+    }
+  }
+
+  async restartBrowser(): Promise<void> {
+    try {
+      console.log("Restarting browser...");
+      
+      // Close current browser
+      if (this.browser) {
+        await this.browser.close();
+        this.browser = null;
+        this.page = null;
+      }
+
+      // Reset page counter
+      this.pagesScraped = 0;
+
+      // Reinitialize browser (this will include cache clearing in production)
+      await this.initialize();
+      
+      console.log("Browser restarted successfully");
+    } catch (error) {
+      console.error("Error restarting browser:", error);
+      throw error;
     }
   }
 
