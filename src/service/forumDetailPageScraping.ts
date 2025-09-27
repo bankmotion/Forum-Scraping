@@ -64,6 +64,11 @@ class ForumDetailPageScraper {
   private readonly NODE_INDEX = parseInt(process.env.NODE_INDEX || "0");
   private readonly NODE_COUNT = parseInt(process.env.NODE_COUNT || "1");
 
+  // Memory monitoring configuration
+  private readonly MIN_AVAILABLE_MEMORY_MB = 200; // 200MB minimum available memory
+  private readonly MEMORY_CHECK_INTERVAL = 30000; // Check every 10 seconds
+  private memoryCheckInterval: NodeJS.Timeout | null = null;
+
   constructor() {
     this.cookiesPath = path.join(__dirname, "../../cookies.json");
     this.credentials = {
@@ -102,6 +107,73 @@ class ForumDetailPageScraper {
     return { browser, tempDir };
   }
 
+  /**
+   * Check available memory and reboot system if below threshold in production
+   */
+  private async checkMemoryAndRebootIfNeeded(): Promise<void> {
+    if (this.mode !== "production") {
+      return; // Only check in production mode
+    }
+
+    try {
+      const { exec } = require('child_process');
+      const util = require('util');
+      const execAsync = util.promisify(exec);
+
+      // Get memory info using free command
+      const { stdout } = await execAsync('free -m');
+      const lines = stdout.split('\n');
+      const memLine = lines[1]; // Second line contains memory info
+      
+      if (memLine) {
+        const parts = memLine.split(/\s+/);
+        const availableMemoryMB = parseInt(parts[6]); // Available memory in MB
+        
+        console.log(`💾 Available memory: ${availableMemoryMB}MB (threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
+        
+        if (availableMemoryMB < this.MIN_AVAILABLE_MEMORY_MB) {
+          console.log(`🚨 CRITICAL: Available memory (${availableMemoryMB}MB) is below threshold (${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
+          console.log(`🔄 Initiating system reboot in 5 seconds...`);
+          
+          // Give time for logs to be written
+          await this.delay(5000);
+          
+          // Execute reboot command
+          console.log(`🔄 Executing system reboot...`);
+          await execAsync('sudo reboot');
+        }
+      }
+    } catch (error) {
+      console.error("Error checking memory or rebooting:", error);
+    }
+  }
+
+  /**
+   * Start memory monitoring in production mode
+   */
+  private startMemoryMonitoring(): void {
+    if (this.mode !== "production") {
+      return; // Only monitor in production mode
+    }
+
+    console.log(`🔍 Starting memory monitoring (checking every ${this.MEMORY_CHECK_INTERVAL / 1000}s, threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
+    
+    this.memoryCheckInterval = setInterval(async () => {
+      await this.checkMemoryAndRebootIfNeeded();
+    }, this.MEMORY_CHECK_INTERVAL);
+  }
+
+  /**
+   * Stop memory monitoring
+   */
+  private stopMemoryMonitoring(): void {
+    if (this.memoryCheckInterval) {
+      clearInterval(this.memoryCheckInterval);
+      this.memoryCheckInterval = null;
+      console.log("🔍 Memory monitoring stopped");
+    }
+  }
+
   async initialize(): Promise<void> {
     const { browser, tempDir } = await this.initializeBrowser();
     this.browser = browser;
@@ -124,6 +196,9 @@ class ForumDetailPageScraper {
     if (!isLoggedIn) {
       throw new Error("Failed to login");
     }
+
+    // Start memory monitoring in production mode
+    this.startMemoryMonitoring();
   }
 
   async loadCookies(): Promise<boolean> {
@@ -1125,6 +1200,9 @@ class ForumDetailPageScraper {
   }
 
   async close(): Promise<void> {
+    // Stop memory monitoring
+    this.stopMemoryMonitoring();
+    
     if (this.browser) {
       await this.browser.close();
       console.log("Detail page scraper closed");
