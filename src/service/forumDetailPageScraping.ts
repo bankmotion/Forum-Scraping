@@ -52,12 +52,12 @@ class ForumDetailPageScraper {
   private tempDir: string = "";
 
   // Batch processing configuration
-  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "10");
+  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "30");
   private readonly DOWNLOAD_BATCH_SIZE = parseInt(
-    process.env.DOWNLOAD_BATCH_SIZE || "10"
+    process.env.DOWNLOAD_BATCH_SIZE || "30"
   );
   private readonly UPLOAD_BATCH_SIZE = parseInt(
-    process.env.UPLOAD_BATCH_SIZE || "10"
+    process.env.UPLOAD_BATCH_SIZE || "30"
   );
 
   // Node distribution configuration
@@ -772,6 +772,7 @@ class ForumDetailPageScraper {
   /**
    * Process media in streaming batches to prevent memory overflow
    * Downloads a batch, uploads immediately, clears memory, then repeats
+   * Includes 300MB size limit - processes immediately if batch exceeds limit
    */
   private async processStreamingBatches(
     mediaTasks: MediaTask[]
@@ -787,13 +788,51 @@ class ForumDetailPageScraper {
       this.UPLOAD_BATCH_SIZE
     );
 
+    // 300MB size limit in bytes
+    const MAX_BATCH_SIZE_BYTES = 300 * 1024 * 1024; // 300MB
+
     console.log(
-      `Starting streaming batch process (${streamingBatchSize} files per batch)...`
+      `Starting streaming batch process (${streamingBatchSize} files per batch, max 300MB per batch)...`
     );
 
-    for (let i = 0; i < mediaTasks.length; i += streamingBatchSize) {
-      const batch = mediaTasks.slice(i, i + streamingBatchSize);
-      const batchNumber = Math.floor(i / streamingBatchSize) + 1;
+    let i = 0;
+    let batchNumber = 1;
+
+    while (i < mediaTasks.length) {
+      // Start with the configured batch size
+      let currentBatchSize = streamingBatchSize;
+      let batch = mediaTasks.slice(i, i + currentBatchSize);
+      
+      // Check if we need to reduce batch size due to size limit
+      if (batch.length > 1) {
+        // Download first file to estimate size
+        try {
+          const firstTask = batch[0];
+          const firstBuffer = await this.s3Service.downloadFile(firstTask.url);
+          const estimatedSizePerFile = firstBuffer.length;
+          
+          // Calculate how many files we can fit in 300MB
+          const maxFilesFor300MB = Math.floor(MAX_BATCH_SIZE_BYTES / estimatedSizePerFile);
+          
+          if (maxFilesFor300MB < batch.length && maxFilesFor300MB > 0) {
+            currentBatchSize = maxFilesFor300MB;
+            batch = mediaTasks.slice(i, i + currentBatchSize);
+            console.log(
+              `📏 Size limit: Reducing batch from ${streamingBatchSize} to ${currentBatchSize} files (estimated ${(estimatedSizePerFile * currentBatchSize / 1024 / 1024).toFixed(1)}MB)`
+            );
+          } else if (maxFilesFor300MB === 0) {
+            // Single file exceeds 300MB, process it individually
+            currentBatchSize = 1;
+            batch = mediaTasks.slice(i, i + 1);
+            console.log(
+              `📏 Size limit: Single file exceeds 300MB (${(estimatedSizePerFile / 1024 / 1024).toFixed(1)}MB), processing individually`
+            );
+          }
+        } catch (error) {
+          console.log(`⚠️ Could not estimate file size, using default batch size: ${currentBatchSize}`);
+        }
+      }
+
       const totalBatches = Math.ceil(mediaTasks.length / streamingBatchSize);
 
       console.log(
@@ -802,17 +841,22 @@ class ForumDetailPageScraper {
 
       // Step 1: Download batch
       const downloadResults = new Map<string, Buffer>();
+      let totalDownloadedSize = 0;
+      
       const downloadPromises = batch.map(async (task) => {
         try {
           const buffer = await this.s3Service.downloadFile(task.url);
           downloadResults.set(task.url, buffer);
-          console.log(`✓ Downloaded: ${task.url}`);
+          totalDownloadedSize += buffer.length;
+          console.log(`✓ Downloaded: ${task.url} (${(buffer.length / 1024 / 1024).toFixed(1)}MB)`);
         } catch (error) {
           console.error(`✗ Download failed: ${task.url}`, error);
         }
       });
 
       await Promise.allSettled(downloadPromises);
+
+      console.log(`📊 Batch total size: ${(totalDownloadedSize / 1024 / 1024).toFixed(1)}MB`);
 
       // Step 2: Upload batch immediately
       const uploadPromises = batch.map(async (task) => {
@@ -861,11 +905,15 @@ class ForumDetailPageScraper {
       }
 
       console.log(
-        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared`
+        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared (${(totalDownloadedSize / 1024 / 1024).toFixed(1)}MB processed)`
       );
 
+      // Move to next batch
+      i += currentBatchSize;
+      batchNumber++;
+
       // Small delay between batches to allow memory cleanup
-      if (i + streamingBatchSize < mediaTasks.length) {
+      if (i < mediaTasks.length) {
         await this.delay(1000);
       }
     }
