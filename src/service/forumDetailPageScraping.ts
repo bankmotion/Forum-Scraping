@@ -880,28 +880,69 @@ class ForumDetailPageScraper {
       
       // Check if we need to reduce batch size due to size limit
       if (batch.length > 1) {
-        // Download first file to estimate size
+        // Sample every 5th file (0, 5, 10, 15...) to estimate size
         try {
-          const firstTask = batch[0];
-          const firstBuffer = await this.s3Service.downloadFile(firstTask.url);
-          const estimatedSizePerFile = firstBuffer.length;
+          const sampleIndices = [];
+          for (let idx = 0; idx < batch.length; idx += 5) {
+            sampleIndices.push(idx);
+          }
           
-          // Calculate how many files we can fit in 300MB
-          const maxFilesFor300MB = Math.floor(MAX_BATCH_SIZE_BYTES / estimatedSizePerFile);
+          console.log(`📊 Sampling ${sampleIndices.length} files (every 5th) for size estimation...`);
           
-          if (maxFilesFor300MB < batch.length && maxFilesFor300MB > 0) {
-            currentBatchSize = maxFilesFor300MB;
-            batch = mediaTasks.slice(i, i + currentBatchSize);
-            console.log(
-              `📏 Size limit: Reducing batch from ${streamingBatchSize} to ${currentBatchSize} files (estimated ${(estimatedSizePerFile * currentBatchSize / 1024 / 1024).toFixed(1)}MB)`
-            );
-          } else if (maxFilesFor300MB === 0) {
-            // Single file exceeds 300MB, process it individually
-            currentBatchSize = 1;
-            batch = mediaTasks.slice(i, i + 1);
-            console.log(
-              `📏 Size limit: Single file exceeds 300MB (${(estimatedSizePerFile / 1024 / 1024).toFixed(1)}MB), processing individually`
-            );
+          // Download sample files to get size estimates
+          const samplePromises = sampleIndices.map(async (idx) => {
+            try {
+              const task = batch[idx];
+              const buffer = await this.s3Service.downloadFile(task.url);
+              return {
+                index: idx,
+                size: buffer.length,
+                url: task.url
+              };
+            } catch (error) {
+              console.error(`✗ Failed to sample file at index ${idx}:`, error);
+              return null;
+            }
+          });
+          
+          const sampleResults = await Promise.allSettled(samplePromises);
+          const validSamples = sampleResults
+            .filter(result => result.status === 'fulfilled' && result.value !== null)
+            .map(result => (result as PromiseFulfilledResult<any>).value);
+          
+          if (validSamples.length === 0) {
+            console.log(`⚠️ No valid samples, using default batch size: ${currentBatchSize}`);
+          } else {
+            // Find the maximum file size from samples
+            const maxSampleSize = Math.max(...validSamples.map(s => s.size));
+            const avgSampleSize = validSamples.reduce((sum, s) => sum + s.size, 0) / validSamples.length;
+            
+            console.log(`📊 Sample results: ${validSamples.length} files sampled`);
+            console.log(`📊 Max sample size: ${(maxSampleSize / 1024 / 1024).toFixed(1)}MB`);
+            console.log(`📊 Avg sample size: ${(avgSampleSize / 1024 / 1024).toFixed(1)}MB`);
+            
+            // Use the maximum size for conservative estimation
+            const estimatedSizePerFile = maxSampleSize;
+            
+            // Calculate how many files we can fit in 300MB
+            const maxFilesFor300MB = Math.floor(MAX_BATCH_SIZE_BYTES / estimatedSizePerFile);
+            
+            if (maxFilesFor300MB < batch.length && maxFilesFor300MB > 0) {
+              currentBatchSize = maxFilesFor300MB;
+              batch = mediaTasks.slice(i, i + currentBatchSize);
+              console.log(
+                `📏 Size limit: Reducing batch from ${streamingBatchSize} to ${currentBatchSize} files (estimated ${(estimatedSizePerFile * currentBatchSize / 1024 / 1024).toFixed(1)}MB)`
+              );
+            } else if (maxFilesFor300MB === 0) {
+              // Single file exceeds 300MB, process it individually
+              currentBatchSize = 1;
+              batch = mediaTasks.slice(i, i + 1);
+              console.log(
+                `📏 Size limit: Single file exceeds 300MB (${(estimatedSizePerFile / 1024 / 1024).toFixed(1)}MB), processing individually`
+              );
+            } else {
+              console.log(`📏 Size limit: Batch size OK (estimated ${(estimatedSizePerFile * batch.length / 1024 / 1024).toFixed(1)}MB)`);
+            }
           }
         } catch (error) {
           console.log(`⚠️ Could not estimate file size, using default batch size: ${currentBatchSize}`);
