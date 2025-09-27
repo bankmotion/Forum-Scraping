@@ -924,24 +924,29 @@ class ForumDetailPageScraper {
             // Use the maximum size for conservative estimation
             const estimatedSizePerFile = maxSampleSize;
             
-            // Calculate how many files we can fit in 300MB
-            const maxFilesFor300MB = Math.floor(MAX_BATCH_SIZE_BYTES / estimatedSizePerFile);
+            // Calculate estimated total size for current batch
+            const estimatedBatchSize = estimatedSizePerFile * batch.length;
             
-            if (maxFilesFor300MB < batch.length && maxFilesFor300MB > 0) {
-              currentBatchSize = maxFilesFor300MB;
-              batch = mediaTasks.slice(i, i + currentBatchSize);
-              console.log(
-                `📏 Size limit: Reducing batch from ${streamingBatchSize} to ${currentBatchSize} files (estimated ${(estimatedSizePerFile * currentBatchSize / 1024 / 1024).toFixed(1)}MB)`
-              );
-            } else if (maxFilesFor300MB === 0) {
-              // Single file exceeds 300MB, process it individually
-              currentBatchSize = 1;
-              batch = mediaTasks.slice(i, i + 1);
-              console.log(
-                `📏 Size limit: Single file exceeds 300MB (${(estimatedSizePerFile / 1024 / 1024).toFixed(1)}MB), processing individually`
-              );
+            if (estimatedBatchSize > MAX_BATCH_SIZE_BYTES) {
+              // Calculate how many files we can fit in 300MB
+              const maxFilesFor300MB = Math.floor(MAX_BATCH_SIZE_BYTES / estimatedSizePerFile);
+              
+              if (maxFilesFor300MB > 0) {
+                currentBatchSize = maxFilesFor300MB;
+                batch = mediaTasks.slice(i, i + currentBatchSize);
+                console.log(
+                  `📏 Size limit: Reducing batch from ${streamingBatchSize} to ${currentBatchSize} files (estimated ${(estimatedSizePerFile * currentBatchSize / 1024 / 1024).toFixed(1)}MB)`
+                );
+              } else {
+                // Single file exceeds 300MB, process it individually
+                currentBatchSize = 1;
+                batch = mediaTasks.slice(i, i + 1);
+                console.log(
+                  `📏 Size limit: Single file exceeds 300MB (${(estimatedSizePerFile / 1024 / 1024).toFixed(1)}MB), processing individually`
+                );
+              }
             } else {
-              console.log(`📏 Size limit: Batch size OK (estimated ${(estimatedSizePerFile * batch.length / 1024 / 1024).toFixed(1)}MB)`);
+              console.log(`📏 Size limit: Batch size OK (estimated ${(estimatedBatchSize / 1024 / 1024).toFixed(1)}MB)`);
             }
           }
         } catch (error) {

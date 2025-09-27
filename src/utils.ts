@@ -203,7 +203,7 @@ export const clearBrowserCache = async (page: any): Promise<void> => {
  */
 export const createBrowserConfig = (mode: string, tempDir: string): any => {
   let browserConfig: any = {
-    headless: mode === "production" ? true : false,
+    headless: mode === "production" ? true : true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
     defaultViewport: { width: 1280, height: 720 },
   };
