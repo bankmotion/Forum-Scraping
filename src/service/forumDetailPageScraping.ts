@@ -464,10 +464,10 @@ class ForumDetailPageScraper {
       let cleanUrl = thread.threadUrl;
 
       // Skip if it's a forum URL (not a thread URL)
-      if (cleanUrl.includes("/forums/") || cleanUrl.includes("?prefix_id=")) {
-        console.log(`Skipping forum URL: ${cleanUrl}`);
-        return;
-      }
+      // if (cleanUrl.includes("/forums/") || cleanUrl.includes("?prefix_id=")) {
+      //   console.log(`Skipping forum URL: ${cleanUrl}`);
+      //   return;
+      // }
 
       // Remove /unread suffix if present
       if (cleanUrl.endsWith("/unread")) {
