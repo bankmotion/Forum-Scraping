@@ -150,7 +150,7 @@ export const getMemoryUsage = async (): Promise<void> => {
     console.log("Current memory usage:");
     console.log(stdout);
   } catch (error) {
-    console.error("Error getting memory usage:", error);
+    // console.error("Error getting memory usage:", error);
   }
 };
 
