@@ -211,7 +211,8 @@ class ForumDetailPageScraper {
         this.MEMORY_CHECK_INTERVAL / 1000
       }s, threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`
     );
-    
+
+    this.stopMemoryMonitoring();
 
     this.memoryCheckInterval = setInterval(async () => {
       await this.checkMemoryAndRebootIfNeeded();
