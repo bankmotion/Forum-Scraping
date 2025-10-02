@@ -94,6 +94,52 @@ class ForumDetailPageScraper {
     );
   }
 
+  /**
+   * Helper method to determine if a URL is an image
+   */
+  private isImageUrl(url: string): boolean {
+    const imageExtensions = [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".gif",
+      ".bmp",
+      ".webp",
+      ".svg",
+    ];
+    const lowerUrl = url.toLowerCase();
+    return imageExtensions.some((ext) => lowerUrl.includes(ext));
+  }
+
+  /**
+   * Helper method to determine if a URL is a video
+   */
+  private isVideoUrl(url: string): boolean {
+    const videoExtensions = [
+      ".mp4",
+      ".avi",
+      ".mov",
+      ".wmv",
+      ".flv",
+      ".webm",
+      ".mkv",
+    ];
+    const lowerUrl = url.toLowerCase();
+    return (
+      videoExtensions.some((ext) => lowerUrl.includes(ext)) ||
+      lowerUrl.includes("youtube.com") ||
+      lowerUrl.includes("youtu.be") ||
+      lowerUrl.includes("vimeo.com")
+    );
+  }
+
+  /**
+   * Helper method to determine if a URL is an image or video
+   */
+  private isImageOrVideo(url: string): boolean {
+    return this.isImageUrl(url) || this.isVideoUrl(url);
+  }
+
   private async initializeBrowser(): Promise<{
     browser: Browser;
     tempDir: string;
@@ -116,31 +162,35 @@ class ForumDetailPageScraper {
     }
 
     try {
-      const { exec } = require('child_process');
-      const util = require('util');
+      const { exec } = require("child_process");
+      const util = require("util");
       const execAsync = util.promisify(exec);
 
       // Get memory info using free command
-      const { stdout } = await execAsync('free -m');
-      const lines = stdout.split('\n');
+      const { stdout } = await execAsync("free -m");
+      const lines = stdout.split("\n");
       const memLine = lines[1]; // Second line contains memory info
-      
+
       if (memLine) {
         const parts = memLine.split(/\s+/);
         const availableMemoryMB = parseInt(parts[6]); // Available memory in MB
-        
-        console.log(`💾 Available memory: ${availableMemoryMB}MB (threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
-        
+
+        console.log(
+          `💾 Available memory: ${availableMemoryMB}MB (threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`
+        );
+
         if (availableMemoryMB < this.MIN_AVAILABLE_MEMORY_MB) {
-          console.log(`🚨 CRITICAL: Available memory (${availableMemoryMB}MB) is below threshold (${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
+          console.log(
+            `🚨 CRITICAL: Available memory (${availableMemoryMB}MB) is below threshold (${this.MIN_AVAILABLE_MEMORY_MB}MB)`
+          );
           console.log(`🔄 Initiating system reboot in 5 seconds...`);
-          
+
           // Give time for logs to be written
           await this.delay(5000);
-          
+
           // Execute reboot command
           console.log(`🔄 Executing system reboot...`);
-          await execAsync('sudo reboot');
+          await execAsync("sudo reboot");
         }
       }
     } catch (error) {
@@ -156,8 +206,12 @@ class ForumDetailPageScraper {
       return; // Only monitor in production mode
     }
 
-    console.log(`🔍 Starting memory monitoring (checking every ${this.MEMORY_CHECK_INTERVAL / 1000}s, threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`);
-    
+    console.log(
+      `🔍 Starting memory monitoring (checking every ${
+        this.MEMORY_CHECK_INTERVAL / 1000
+      }s, threshold: ${this.MIN_AVAILABLE_MEMORY_MB}MB)`
+    );
+
     this.memoryCheckInterval = setInterval(async () => {
       await this.checkMemoryAndRebootIfNeeded();
     }, this.MEMORY_CHECK_INTERVAL);
@@ -209,7 +263,7 @@ class ForumDetailPageScraper {
         return true;
       }
     } catch (error) {
-      console.log("No valid cookies found or error loading cookies:", error);
+      // console.log("No valid cookies found or error loading cookies:", error);
     }
     return false;
   }
@@ -234,10 +288,10 @@ class ForumDetailPageScraper {
         await cookieButton.click();
       }
     } catch (error) {
-      console.log(
-        "No cookie consent dialog found or error handling it:",
-        error
-      );
+      // console.log(
+      //   "No cookie consent dialog found or error handling it:",
+      //   error
+      // );
     }
   }
 
@@ -403,7 +457,7 @@ class ForumDetailPageScraper {
       // Check if we're still logged in with the cookies
       const isLoggedIn = await this.checkLoginStatus();
       if (isLoggedIn) {
-        console.log("Already logged in with saved cookies");
+        // console.log("Already logged in with saved cookies");
         return true;
       }
     }
@@ -500,9 +554,12 @@ class ForumDetailPageScraper {
             this.page!.goto(pageUrl, {
               waitUntil: "networkidle2",
             }),
-            new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Page load timeout after 30 seconds')), 30000)
-            )
+            new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error("Page load timeout after 30 seconds")),
+                30000
+              )
+            ),
           ]);
 
           // Handle cookie consent on first page only
@@ -523,20 +580,23 @@ class ForumDetailPageScraper {
 
           // Check if we need to restart browser
           if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-            console.log(
-              `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
-            );
+            // console.log(
+            //   `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
+            // );
             await this.restartBrowser();
           }
-
         } catch (error) {
-          console.error(`❌ Page ${pageNum} failed to load within 30 seconds: ${pageUrl}`);
+          // console.error(
+          //   `❌ Page ${pageNum} failed to load within 30 seconds: ${pageUrl}`
+          // );
           console.error(`Error: ${error}`);
-          
+
           // Skip this page and continue to next page
-          console.log(`⏭️    page ${pageNum} failed to load. Restarting browser...`);
+          // console.log(
+          //   `⏭️    page ${pageNum} failed to load. Restarting browser...`
+          // );
           await this.restartBrowser();
-          
+
           this.pagesScraped++;
         }
       }
@@ -582,6 +642,7 @@ class ForumDetailPageScraper {
 
   /**
    * Scrape all posts from current page and collect all media URLs
+   * UPDATED: Extract full-size image URLs from <a href> links instead of thumbnails
    */
   private async scrapePagePosts(): Promise<PostData[]> {
     try {
@@ -636,7 +697,7 @@ class ForumDetailPageScraper {
             );
             const content = contentElement?.textContent?.trim() || "";
 
-            // Extract media (images and videos) - CORRECTED SELECTORS
+            // Extract media (images and videos) - UPDATED LOGIC
             const medias: string[] = [];
 
             // Get attachments from message-attachments section
@@ -644,22 +705,7 @@ class ForumDetailPageScraper {
               ".message-attachments"
             );
             if (attachmentSection) {
-              // Get attachment images
-              const attachmentImages =
-                attachmentSection.querySelectorAll("img[src]");
-              attachmentImages.forEach((img: any) => {
-                const src = img.getAttribute("src");
-                if (
-                  src &&
-                  !src.includes("avatar") &&
-                  !src.includes("smiley") &&
-                  !src.includes("icon")
-                ) {
-                  medias.push(src);
-                }
-              });
-
-              // Get attachment links
+              // Get attachment links (full-size images) - PRIORITY: Extract from <a href>
               const attachmentLinks = attachmentSection.querySelectorAll(
                 'a[href*="/attachments/"]'
               );
@@ -672,6 +718,27 @@ class ForumDetailPageScraper {
                   medias.push(fullUrl);
                 }
               });
+
+              if (medias.length === 0) {
+                // Get attachment images (thumbnails) - SECONDARY: Only if no <a href> found
+                const attachmentImages =
+                  attachmentSection.querySelectorAll("img[src]");
+                attachmentImages.forEach((img: any) => {
+                  const src = img.getAttribute("src");
+                  if (
+                    src &&
+                    !src.includes("avatar") &&
+                    !src.includes("smiley") &&
+                    !src.includes("icon")
+                  ) {
+                    // Convert relative URLs to absolute
+                    const fullUrl = src.startsWith("http")
+                      ? src
+                      : `https://www.lpsg.com${src}`;
+                    medias.push(fullUrl);
+                  }
+                });
+              }
             }
 
             // Get images from message content (inline images)
@@ -760,7 +827,7 @@ class ForumDetailPageScraper {
   }
 
   /**
-   * Process all media from a page in streaming batches - ONLY for new posts
+   * Process all media from a page in streaming batches - UPDATED: Always process posts
    * Downloads a batch, uploads immediately, clears memory, then repeats
    */
   private async processPageMediaBatch(
@@ -772,29 +839,22 @@ class ForumDetailPageScraper {
       `Processing media for ${posts.length} posts in thread ${threadId}`
     );
 
-    // Filter out posts that already exist in database
-    const newPosts = posts.filter((post) => !existingPostIds.has(post.postId));
-
-    if (newPosts.length === 0) {
-      console.log(`No new posts to process for thread ${threadId}`);
-      return new Map();
-    }
+    // UPDATED: Always process all posts, not just new ones
+    const allPosts = posts; // Process all posts, even existing ones
 
     console.log(
-      `Found ${newPosts.length} new posts (${
-        posts.length - newPosts.length
-      } already exist)`
+      `Processing ${allPosts.length} posts (including existing ones) for thread ${threadId}`
     );
 
-    // Collect all media tasks from ONLY new posts
+    // Collect all media tasks from ALL posts
     const allMediaTasks: MediaTask[] = [];
     const postMediaMap = new Map<number, string[]>();
 
-    for (const post of newPosts) {
+    for (const post of allPosts) {
       const processedMedias: string[] = [];
 
       for (const mediaUrl of post.medias) {
-        if (this.s3Service.isImageOrVideo(mediaUrl)) {
+        if (this.isImageUrl(mediaUrl)) {
           const key = this.s3Service.generateKey(
             mediaUrl,
             threadId,
@@ -814,7 +874,7 @@ class ForumDetailPageScraper {
     }
 
     console.log(
-      `Found ${allMediaTasks.length} media files to process from ${newPosts.length} new posts`
+      `Found ${allMediaTasks.length} media files to process from ${allPosts.length} posts`
     );
 
     if (allMediaTasks.length === 0) {
@@ -856,11 +916,8 @@ class ForumDetailPageScraper {
       { success: boolean; s3Url?: string }
     >();
 
-    // Fixed batch size of 5 files per batch
-    const BATCH_SIZE = 5;
-
     console.log(
-      `Starting streaming batch process (${BATCH_SIZE} files per batch)...`
+      `Starting streaming batch process (${this.BATCH_SIZE} files per batch)...`
     );
 
     let i = 0;
@@ -868,8 +925,8 @@ class ForumDetailPageScraper {
 
     while (i < mediaTasks.length) {
       // Create batch of 5 files (or remaining files if less than 5)
-      const batch = mediaTasks.slice(i, i + BATCH_SIZE);
-      const totalBatches = Math.ceil(mediaTasks.length / BATCH_SIZE);
+      const batch = mediaTasks.slice(i, i + this.BATCH_SIZE);
+      const totalBatches = Math.ceil(mediaTasks.length / this.BATCH_SIZE);
 
       console.log(
         `Processing streaming batch ${batchNumber}/${totalBatches} (${batch.length} files)`
@@ -878,13 +935,17 @@ class ForumDetailPageScraper {
       // Step 1: Download batch
       const downloadResults = new Map<string, Buffer>();
       let totalDownloadedSize = 0;
-      
+
       const downloadPromises = batch.map(async (task) => {
         try {
           const buffer = await this.s3Service.downloadFile(task.url);
           downloadResults.set(task.url, buffer);
           totalDownloadedSize += buffer.length;
-          console.log(`✓ Downloaded: ${task.url} (${(buffer.length / 1024 / 1024).toFixed(1)}MB)`);
+          console.log(
+            `✓ Downloaded: ${task.url} (${(buffer.length / 1024 / 1024).toFixed(
+              1
+            )}MB)`
+          );
         } catch (error) {
           console.error(`✗ Download failed: ${task.url}`, error);
         }
@@ -892,7 +953,11 @@ class ForumDetailPageScraper {
 
       await Promise.allSettled(downloadPromises);
 
-      console.log(`📊 Batch total size: ${(totalDownloadedSize / 1024 / 1024).toFixed(1)}MB`);
+      console.log(
+        `📊 Batch total size: ${(totalDownloadedSize / 1024 / 1024).toFixed(
+          1
+        )}MB`
+      );
 
       // Step 2: Upload batch immediately
       const uploadPromises = batch.map(async (task) => {
@@ -941,11 +1006,15 @@ class ForumDetailPageScraper {
       }
 
       console.log(
-        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared (${(totalDownloadedSize / 1024 / 1024).toFixed(1)}MB processed)`
+        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared (${(
+          totalDownloadedSize /
+          1024 /
+          1024
+        ).toFixed(1)}MB processed)`
       );
 
       // Move to next batch
-      i += BATCH_SIZE;
+      i += this.BATCH_SIZE;
       batchNumber++;
 
       // Small delay between batches to allow memory cleanup
@@ -965,14 +1034,14 @@ class ForumDetailPageScraper {
   }
 
   /**
-   * Updated savePostsToDatabase method with proper filtering
+   * UPDATED savePostsToDatabase method - Always process posts and replace only image URLs
    */
   private async savePostsToDatabase(
     threadId: string,
     posts: PostData[]
   ): Promise<void> {
     try {
-      // Get all existing posts for this thread to avoid duplicate processing
+      // Get all existing posts for this thread
       const existingPosts = await ForumPost.findAll({
         where: { threadId: threadId },
         attributes: ["postId", "medias"],
@@ -985,49 +1054,71 @@ class ForumDetailPageScraper {
         `Found ${existingPostIds.size} existing posts for thread ${threadId}`
       );
 
-      // Process all media in batches - ONLY for new posts
+      // Process all media in batches - UPDATED: Process ALL posts
       const postMediaMap = await this.processPageMediaBatch(
         posts,
         threadId,
         existingPostIds
       );
 
-      // Get new posts for database saving
-      const newPosts = posts.filter(
-        (post) => !existingPostIds.has(post.postId)
-      );
+      // UPDATED: Process ALL posts, not just new ones
+      const allPosts = posts;
 
-      if (newPosts.length === 0) {
-        console.log(`No new posts to process for thread ${threadId}`);
-        return;
-      }
+      console.log(`Processing ${allPosts.length} posts for thread ${threadId}`);
 
-      console.log(
-        `Processing ${newPosts.length} new posts for thread ${threadId}`
-      );
-
-      // Save all NEW posts to database after batch processing is complete
-      const dbPromises = newPosts.map(async (postData) => {
+      // Save ALL posts to database after batch processing is complete
+      const dbPromises = allPosts.map(async (postData) => {
         const processedMedias = postMediaMap.get(postData.postId) || [];
 
-        if (processedMedias.length > 0) {
-          await ForumPost.upsert({
-            postId: postData.postId,
-            threadId: threadId,
-            author: postData.author,
-            content: postData.content,
-            medias: JSON.stringify(processedMedias),
-          });
-          console.log(
-            `✓ Saved post ${postData.postId} with ${processedMedias.length} media files`
+        // UPDATED: For existing posts, replace only image URLs, preserve video URLs
+        if (existingPostIds.has(postData.postId)) {
+          const existingPost = existingPosts.find(
+            (p) => p.postId === postData.postId
           );
+          if (existingPost) {
+            const existingMedias = JSON.parse(existingPost.medias || "[]");
+            const newImageUrls = processedMedias.filter((url) =>
+              this.isImageUrl(url)
+            );
+            const existingVideoUrls = existingMedias.filter((url: string) =>
+              this.isVideoUrl(url)
+            );
+
+            // Combine new image URLs with existing video URLs
+            const finalMedias = [...newImageUrls, ...existingVideoUrls];
+
+            await ForumPost.upsert({
+              postId: postData.postId,
+              threadId: threadId,
+              author: postData.author,
+              content: postData.content,
+              medias: JSON.stringify(finalMedias),
+            });
+            console.log(
+              `✓ Updated post ${postData.postId} with ${newImageUrls.length} new image URLs, preserved ${existingVideoUrls.length} video URLs`
+            );
+          }
+        } else {
+          // New posts: save all media
+          if (processedMedias.length > 0) {
+            await ForumPost.upsert({
+              postId: postData.postId,
+              threadId: threadId,
+              author: postData.author,
+              content: postData.content,
+              medias: JSON.stringify(processedMedias),
+            });
+            console.log(
+              `✓ Saved new post ${postData.postId} with ${processedMedias.length} media files`
+            );
+          }
         }
       });
 
       await Promise.allSettled(dbPromises);
 
       console.log(
-        `✓ Completed processing ${newPosts.length} posts for thread ${threadId}`
+        `✓ Completed processing ${allPosts.length} posts for thread ${threadId}`
       );
     } catch (error) {
       console.error("Error saving posts to database:", error);
@@ -1163,7 +1254,7 @@ class ForumDetailPageScraper {
   async close(): Promise<void> {
     // Stop memory monitoring
     this.stopMemoryMonitoring();
-    
+
     if (this.browser) {
       await this.browser.close();
       console.log("Detail page scraper closed");
