@@ -335,35 +335,38 @@ class ForumDetailPageScraper {
       }
 
       if (!loginLink) {
-        // Try clicking by text content using evaluate
-        loginLink = await this.page!.evaluateHandle(() => {
+        // Try clicking by text content using evaluate - FIXED: Handle properly
+        const loginLinkFound = await this.page!.evaluate(() => {
           const document = (globalThis as any).document;
           const links = Array.from(document.querySelectorAll("a"));
-          return links.find((link: any) =>
+          const loginLink = links.find((link: any) =>
             link.textContent?.includes("Log in")
           );
+          if (loginLink) {
+            (loginLink as any).click();
+            return true;
+          }
+          return false;
         });
-      }
 
-      if (!loginLink) {
-        return true;
-      }
-
-      // Check if element is visible
-      const isVisible = await loginLink.isVisible();
-
-      if (!isVisible) {
-        await loginLink.scrollIntoView();
-        await this.delay(1000);
-      }
-
-      // Try clicking the login link with error handling
-      try {
-        await loginLink.click();
-      } catch (clickError) {
-        await this.page!.evaluate((element) => {
-          element.click();
-        }, loginLink);
+        if (!loginLinkFound) {
+          return true; // Already logged in or no login link found
+        }
+      } else {
+        // We have a proper ElementHandle, check visibility and click normally
+        try {
+          const isVisible = await loginLink.isVisible();
+          if (!isVisible) {
+            await loginLink.scrollIntoView();
+            await this.delay(1000);
+          }
+          await loginLink.click();
+        } catch (clickError) {
+          // Fallback: try clicking via evaluate
+          await this.page!.evaluate((element) => {
+            element.click();
+          }, loginLink);
+        }
       }
 
       // Wait a bit for modal to start opening
