@@ -299,6 +299,7 @@ class ForumDetailPageScraper {
     try {
       await this.page!.goto(this.FORUM_URL, {
         waitUntil: "networkidle2",
+        timeout: 5000,
       });
 
       // Handle cookie consent first
@@ -308,7 +309,6 @@ class ForumDetailPageScraper {
       const userAccountLink = await this.page!.$('a[href="/account/"]');
       return !!userAccountLink; // If user account link exists, we're logged in
     } catch (error) {
-      console.error("Error checking login status:", error);
       return false;
     }
   }
