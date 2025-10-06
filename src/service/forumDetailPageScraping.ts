@@ -181,7 +181,7 @@ class ForumDetailPageScraper {
     let attachmentPage: Page | null = null;
 
     try {
-      console.log(`Downloading from attachment page: ${attachmentUrl}`);
+      // console.log(`Downloading from attachment page: ${attachmentUrl}`);
 
       if (!this.browser) {
         throw new Error("Browser not initialized");
@@ -190,7 +190,6 @@ class ForumDetailPageScraper {
       // Extract file extension from the attachment URL
       const fileExtension =
         this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
-      console.log(`Detected file extension: ${fileExtension}`);
 
       // Create a new page for this attachment
       attachmentPage = await this.browser.newPage();
@@ -204,7 +203,7 @@ class ForumDetailPageScraper {
       if (this.page) {
         const cookies = await this.page.cookies();
         await attachmentPage.setCookie(...cookies);
-        console.log(`Copied ${cookies.length} cookies to attachment page`);
+        // console.log(`Copied ${cookies.length} cookies to attachment page`);
       }
 
       // Navigate to the attachment page
@@ -234,10 +233,7 @@ class ForumDetailPageScraper {
       const imageBuffer = await response.buffer();
       return { buffer: imageBuffer, extension: fileExtension };
     } catch (error) {
-      console.error(
-        `Error downloading from attachment page ${attachmentUrl}:`,
-        error
-      );
+      // console.error(`Error downloading from attachment page ${attachmentUrl}:`);
       return null;
     } finally {
       // Always close the attachment page to prevent memory leaks
@@ -277,9 +273,9 @@ class ForumDetailPageScraper {
     }
 
     // Default to .jpg if no extension found
-    console.warn(
-      `No file extension found in URL: ${attachmentUrl}, defaulting to .jpg`
-    );
+    // console.warn(
+    //   `No file extension found in URL: ${attachmentUrl}, defaulting to .jpg`
+    // );
     return ".jpg";
   }
 
@@ -687,6 +683,12 @@ class ForumDetailPageScraper {
       const totalPages = await this.getTotalPages(fullUrl);
       console.log(`Thread has ${totalPages} pages`);
 
+      // Get all existing posts for this thread
+      const existingPosts = await ForumPost.findAll({
+        where: { threadId: thread.threadId },
+        attributes: ["postId", "medias"],
+      });
+
       // Scrape all pages and save after each page
       for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
         console.log(`Scraping page ${pageNum} of ${totalPages}...`);
@@ -717,7 +719,7 @@ class ForumDetailPageScraper {
           const posts = await this.scrapePagePosts();
 
           // Save posts to database with batch processing
-          await this.savePostsToDatabase(thread.threadId, posts);
+          await this.savePostsToDatabase(thread.threadId, posts, existingPosts);
 
           // Clear memory cache after each page is processed
           await this.clearPageMemoryCache();
@@ -966,7 +968,7 @@ class ForumDetailPageScraper {
         return posts;
       });
 
-      console.log(`Scraped ${posts.length} posts`, posts);
+      console.log(`Scraped ${posts.length} posts`);
 
       return posts;
     } catch (error) {
@@ -1035,6 +1037,7 @@ class ForumDetailPageScraper {
 
     // Process in streaming batches: download -> upload -> clear memory -> repeat
     const uploadResults = await this.processStreamingBatches(allMediaTasks);
+    console.log(`Upload results:`, uploadResults.size);
 
     // Update post media map with S3 URLs
     for (const [postId, originalUrls] of postMediaMap.entries()) {
@@ -1070,6 +1073,7 @@ class ForumDetailPageScraper {
 
     let i = 0;
     let batchNumber = 1;
+    console.log(`mediaTasks:`, mediaTasks.length);
 
     while (i < mediaTasks.length) {
       // Create batch of 5 files (or remaining files if less than 5)
@@ -1115,7 +1119,7 @@ class ForumDetailPageScraper {
             );
           }
         } catch (error) {
-          console.error(`✗ Download failed: ${task.url}`, error);
+          console.error(`✗ Download failed: ${task.url}`);
         }
       });
 
@@ -1132,7 +1136,7 @@ class ForumDetailPageScraper {
         try {
           const buffer = downloadResults.get(task.url);
           if (!buffer) {
-            console.error(`✗ No buffer found for: ${task.url}`);
+            // console.error(`✗ No buffer found for: ${task.url}`);
             uploadResults.set(task.url, { success: false });
             return;
           }
@@ -1161,7 +1165,6 @@ class ForumDetailPageScraper {
           uploadResults.set(task.url, { success: false });
         }
       });
-      console.log(`upload results:`, uploadResults);
 
       await Promise.allSettled(uploadPromises);
 
@@ -1206,15 +1209,10 @@ class ForumDetailPageScraper {
    */
   private async savePostsToDatabase(
     threadId: string,
-    posts: PostData[]
+    posts: PostData[],
+    existingPosts: ForumPost[]
   ): Promise<void> {
     try {
-      // Get all existing posts for this thread
-      const existingPosts = await ForumPost.findAll({
-        where: { threadId: threadId },
-        attributes: ["postId", "medias"],
-      });
-
       // Create a map of existing post IDs for quick lookup
       const existingPostIds = new Set(existingPosts.map((post) => post.postId));
 

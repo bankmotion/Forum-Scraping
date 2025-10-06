@@ -382,8 +382,8 @@ export class S3Service {
     postId: number,
     extension: string
   ): string {
-    const url = new URL(originalUrl);
-    const pathParts = url.pathname.split("/");
+    // const url = new URL(originalUrl);
+    const pathParts = originalUrl.split("/");
     const filename = pathParts[pathParts.length - 1] || "media";
     
     // Remove any existing extension and add the specified one
