@@ -31,6 +31,7 @@ interface MediaTask {
   postId: number;
   threadId: string;
   key: string;
+  extension?: string; // Optional file extension for attachment pages
 }
 
 interface LoginCredentials {
@@ -97,7 +98,7 @@ class ForumDetailPageScraper {
   /**
    * Helper method to determine if a URL is an image
    */
-  private isImageUrl(url: string): boolean {
+  public isImageUrl(url: string): boolean {
     const imageExtensions = [
       ".jpg",
       ".jpeg",
@@ -138,6 +139,148 @@ class ForumDetailPageScraper {
    */
   private isImageOrVideo(url: string): boolean {
     return this.isImageUrl(url) || this.isVideoUrl(url);
+  }
+
+  /**
+   * Helper method to determine if a URL is NOT a raw image file
+   * (i.e., it's an attachment page that needs to be processed)
+   */
+  public isNotRawImg(url: string): boolean {
+    const lowerUrl = url.toLowerCase();
+
+    // Check if it has image name but no extension (like screenshot-2024-01-25-013402-png.120147661)
+    const imageNames = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"];
+    const hasImageName = imageNames.some((name) => lowerUrl.includes(name));
+
+    // Check if it's a direct image file with extension
+    const imageExtensions = [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".gif",
+      ".bmp",
+      ".webp",
+      ".svg",
+    ];
+    const hasImageExtension = imageExtensions.some((ext) =>
+      lowerUrl.includes(ext)
+    );
+
+    // Return true if it has image name but no extension (attachment page)
+    return hasImageName && !hasImageExtension;
+  }
+
+  /**
+   * Download image from LPSG attachment page by extracting the actual CDN URL
+   * @param attachmentUrl - The attachment page URL
+   * @returns Promise<{buffer: Buffer, extension: string} | null> - The image buffer and extension or null if failed
+   */
+  private async downloadFromAttachmentPage(
+    attachmentUrl: string
+  ): Promise<{ buffer: Buffer; extension: string } | null> {
+    let attachmentPage: Page | null = null;
+
+    try {
+      console.log(`Downloading from attachment page: ${attachmentUrl}`);
+
+      if (!this.browser) {
+        throw new Error("Browser not initialized");
+      }
+
+      // Extract file extension from the attachment URL
+      const fileExtension =
+        this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
+      console.log(`Detected file extension: ${fileExtension}`);
+
+      // Create a new page for this attachment
+      attachmentPage = await this.browser.newPage();
+
+      // Set user agent for the new page
+      await attachmentPage.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
+      // Copy cookies from the main page to ensure authentication
+      if (this.page) {
+        const cookies = await this.page.cookies();
+        await attachmentPage.setCookie(...cookies);
+        console.log(`Copied ${cookies.length} cookies to attachment page`);
+      }
+
+      // Navigate to the attachment page
+      await attachmentPage.goto(attachmentUrl, {
+        waitUntil: "networkidle2",
+        timeout: 30000,
+      });
+
+      // Wait a bit for the page to fully load
+      await this.delay(500);
+
+      // Wait for the image to be fully loaded on the page
+      await attachmentPage.waitForSelector("img", { timeout: 10000 });
+
+      // Download the image using the page's context to maintain authentication
+      // Navigate to the image URL directly to get the image data
+      const response = await attachmentPage.goto(attachmentUrl, {
+        waitUntil: "networkidle2",
+        timeout: 30000,
+      });
+
+      if (!response || !response.ok()) {
+        throw new Error(`Failed to load image: ${response?.status()}`);
+      }
+
+      // Get the response body as buffer
+      const imageBuffer = await response.buffer();
+      return { buffer: imageBuffer, extension: fileExtension };
+    } catch (error) {
+      console.error(
+        `Error downloading from attachment page ${attachmentUrl}:`,
+        error
+      );
+      return null;
+    } finally {
+      // Always close the attachment page to prevent memory leaks
+      if (attachmentPage) {
+        try {
+          await attachmentPage.close();
+        } catch (closeError) {
+          console.error("Error closing attachment page:", closeError);
+        }
+      }
+    }
+  }
+
+  /**
+   * Extract file extension from attachment URL
+   * @param attachmentUrl - The attachment page URL
+   * @returns string - The file extension (e.g., '.png', '.jpg')
+   */
+  public extractFileExtensionFromAttachmentUrl(attachmentUrl: string): string {
+    const lowerUrl = attachmentUrl.toLowerCase();
+
+    // Check for common image extensions in the URL
+    const imageExtensions = [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".bmp",
+      ".webp",
+      ".svg",
+    ];
+
+    for (const ext of imageExtensions) {
+      if (lowerUrl.includes(ext)) {
+        return ext;
+      }
+    }
+
+    // Default to .jpg if no extension found
+    console.warn(
+      `No file extension found in URL: ${attachmentUrl}, defaulting to .jpg`
+    );
+    return ".jpg";
   }
 
   private async initializeBrowser(): Promise<{
@@ -539,7 +682,6 @@ class ForumDetailPageScraper {
       }
 
       const fullUrl = `${this.SITE_URL}${cleanUrl}`;
-      console.log(`Full URL: ${fullUrl}`);
 
       // Get total pages for this thread
       const totalPages = await this.getTotalPages(fullUrl);
@@ -824,6 +966,8 @@ class ForumDetailPageScraper {
         return posts;
       });
 
+      console.log(`Scraped ${posts.length} posts`, posts);
+
       return posts;
     } catch (error) {
       console.error("Error scraping page posts:", error);
@@ -840,16 +984,8 @@ class ForumDetailPageScraper {
     threadId: string,
     existingPostIds: Set<number>
   ): Promise<Map<number, string[]>> {
-    console.log(
-      `Processing media for ${posts.length} posts in thread ${threadId}`
-    );
-
     // UPDATED: Always process all posts, not just new ones
     const allPosts = posts; // Process all posts, even existing ones
-
-    console.log(
-      `Processing ${allPosts.length} posts (including existing ones) for thread ${threadId}`
-    );
 
     // Collect all media tasks from ALL posts
     const allMediaTasks: MediaTask[] = [];
@@ -859,17 +995,32 @@ class ForumDetailPageScraper {
       const processedMedias: string[] = [];
 
       for (const mediaUrl of post.medias) {
-        if (this.isImageUrl(mediaUrl)) {
-          const key = this.s3Service.generateKey(
-            mediaUrl,
-            threadId,
-            post.postId
-          );
+        // Handle both raw images and LPSG attachment pages
+        if (this.isImageUrl(mediaUrl) || this.isNotRawImg(mediaUrl)) {
+          let key: string;
+          let extension: string | undefined;
+
+          if (this.isNotRawImg(mediaUrl)) {
+            // For attachment pages, we need to extract the extension and modify the key
+            extension = this.extractFileExtensionFromAttachmentUrl(mediaUrl);
+            // Generate key with the proper extension
+            key = this.s3Service.generateKeyWithExtension(
+              mediaUrl,
+              threadId,
+              post.postId,
+              extension
+            );
+          } else {
+            // For regular images, use the existing method
+            key = this.s3Service.generateKey(mediaUrl, threadId, post.postId);
+          }
+
           allMediaTasks.push({
             url: mediaUrl,
             postId: post.postId,
             threadId: threadId,
             key: key,
+            extension: extension,
           });
           processedMedias.push(mediaUrl); // Keep original URL for now
         }
@@ -877,10 +1028,6 @@ class ForumDetailPageScraper {
 
       postMediaMap.set(post.postId, processedMedias);
     }
-
-    console.log(
-      `Found ${allMediaTasks.length} media files to process from ${allPosts.length} posts`
-    );
 
     if (allMediaTasks.length === 0) {
       return postMediaMap;
@@ -921,10 +1068,6 @@ class ForumDetailPageScraper {
       { success: boolean; s3Url?: string }
     >();
 
-    console.log(
-      `Starting streaming batch process (${this.BATCH_SIZE} files per batch)...`
-    );
-
     let i = 0;
     let batchNumber = 1;
 
@@ -943,14 +1086,34 @@ class ForumDetailPageScraper {
 
       const downloadPromises = batch.map(async (task) => {
         try {
-          const buffer = await this.s3Service.downloadFile(task.url);
-          downloadResults.set(task.url, buffer);
-          totalDownloadedSize += buffer.length;
-          console.log(
-            `✓ Downloaded: ${task.url} (${(buffer.length / 1024 / 1024).toFixed(
-              1
-            )}MB)`
-          );
+          let buffer: Buffer | null = null;
+
+          // Check if it's an attachment page that needs special handling
+          if (this.isNotRawImg(task.url)) {
+            const result = await this.downloadFromAttachmentPage(task.url);
+            if (!result) {
+              console.error(
+                `✗ Failed to download from attachment page: ${task.url}`
+              );
+              return;
+            }
+            buffer = result.buffer;
+          } else {
+            // Regular image download
+            buffer = await this.s3Service.downloadFile(task.url);
+          }
+
+          if (buffer) {
+            downloadResults.set(task.url, buffer);
+            totalDownloadedSize += buffer.length;
+            console.log(
+              `✓ Downloaded: ${task.url} (${(
+                buffer.length /
+                1024 /
+                1024
+              ).toFixed(1)}MB)`
+            );
+          }
         } catch (error) {
           console.error(`✗ Download failed: ${task.url}`, error);
         }
@@ -993,12 +1156,12 @@ class ForumDetailPageScraper {
 
           const s3Url = `https://${this.s3Service.bucketName}.s3.${process.env.S3_REGION}.wasabisys.com/${task.key}`;
           uploadResults.set(task.url, { success: true, s3Url });
-          console.log(`✓ Uploaded: ${task.url} -> ${s3Url}`);
         } catch (error) {
           console.error(`✗ Upload failed: ${task.url}`, error);
           uploadResults.set(task.url, { success: false });
         }
       });
+      console.log(`upload results:`, uploadResults);
 
       await Promise.allSettled(uploadPromises);
 
@@ -1024,7 +1187,7 @@ class ForumDetailPageScraper {
 
       // Small delay between batches to allow memory cleanup
       if (i < mediaTasks.length) {
-        await this.delay(1000);
+        await this.delay(500);
       }
     }
 
@@ -1099,9 +1262,6 @@ class ForumDetailPageScraper {
               content: postData.content,
               medias: JSON.stringify(finalMedias),
             });
-            console.log(
-              `✓ Updated post ${postData.postId} with ${newImageUrls.length} new image URLs, preserved ${existingVideoUrls.length} video URLs`
-            );
           }
         } else {
           // New posts: save all media
@@ -1113,9 +1273,6 @@ class ForumDetailPageScraper {
               content: postData.content,
               medias: JSON.stringify(processedMedias),
             });
-            console.log(
-              `✓ Saved new post ${postData.postId} with ${processedMedias.length} media files`
-            );
           }
         }
       });
@@ -1266,6 +1423,49 @@ class ForumDetailPageScraper {
     }
   }
 
+  /**
+   * Run detail page scraping for a specific thread by threadId
+   * @param threadId - The ID of the thread to scrape
+   * @returns Promise<ForumThread | null> - The scraped thread data or null if not found
+   */
+  async runDetailPage(threadId: number): Promise<ForumThread | null> {
+    try {
+      console.log(`Starting detail page scraping for thread ID: ${threadId}`);
+
+      // Initialize browser and login
+      await this.initialize();
+
+      // Find the thread by ID
+      const thread = await ForumThread.findOne({
+        where: { threadId: threadId.toString() },
+      });
+
+      if (!thread) {
+        console.error(`Thread with ID ${threadId} not found in database`);
+        return null;
+      }
+
+      console.log(`Found thread: ${thread.title} (${thread.threadId})`);
+
+      // Scrape the thread detail page
+      await this.scrapeThreadDetailPage(thread);
+
+      console.log(
+        `Successfully completed detail page scraping for thread ${threadId}`
+      );
+
+      // Return the updated thread data
+      return await ForumThread.findOne({
+        where: { threadId: threadId.toString() },
+      });
+    } catch (error) {
+      console.error(`Error in runDetailPage for thread ${threadId}:`, error);
+      return null;
+    } finally {
+      await this.close();
+    }
+  }
+
   async run(): Promise<void> {
     try {
       await this.initialize();
@@ -1291,7 +1491,7 @@ class ForumDetailPageScraper {
         await this.scrapeThreadDetailPage(thread);
 
         // Add delay between threads
-        await this.delay(3000);
+        await this.delay(1000);
       }
 
       console.log(

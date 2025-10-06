@@ -22,6 +22,11 @@ async function main() {
     console.log('Starting detail page scraping...');
     const detailPageScraper = new ForumDetailPageScraper();
     await detailPageScraper.run();
+
+    // const threadId = 10003071;
+    // const detailPageScraper = new ForumDetailPageScraper();
+    // const detailPage = await detailPageScraper.runDetailPage(threadId);
+    // console.log(detailPage);
   } catch (error) {
     console.error('Error in main execution:', error);
   }

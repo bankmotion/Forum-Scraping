@@ -8,6 +8,7 @@ import * as https from "https";
 import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
+import * as zlib from "zlib";
 
 import dotenv from "dotenv";
 
@@ -305,9 +306,20 @@ export class S3Service {
     }
 
     const chunks: Buffer[] = [];
-    response.on("data", (chunk: Buffer) => chunks.push(chunk));
-    response.on("end", () => resolve(Buffer.concat(chunks)));
-    response.on("error", reject);
+    
+    // Check if the response is gzipped
+    const contentEncoding = response.headers['content-encoding'];
+    let stream = response;
+    
+    if (contentEncoding === 'gzip') {
+      stream = response.pipe(zlib.createGunzip());
+    } else if (contentEncoding === 'deflate') {
+      stream = response.pipe(zlib.createInflate());
+    }
+    
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
   }
 
   /**
@@ -362,6 +374,28 @@ export class S3Service {
     // Generate unique key: forum-media/threadId/postId/timestamp-filename
     const timestamp = Date.now();
     return `forum-media/${threadId}/${postId}/${timestamp}-${filename}`;
+  }
+
+  generateKeyWithExtension(
+    originalUrl: string,
+    threadId: string,
+    postId: number,
+    extension: string
+  ): string {
+    const url = new URL(originalUrl);
+    const pathParts = url.pathname.split("/");
+    const filename = pathParts[pathParts.length - 1] || "media";
+    
+    // Remove any existing extension and add the specified one
+    const baseFilename = filename.split(".")[0] || "media";
+    const sanitizedFilename = baseFilename.replace(/[^a-zA-Z0-9.-]/g, "_");
+    
+    // Ensure extension starts with dot
+    const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
+    
+    // Generate unique key: forum-media/threadId/postId/timestamp-filename.extension
+    const timestamp = Date.now();
+    return `forum-media/${threadId}/${postId}/${timestamp}-${sanitizedFilename}${normalizedExtension}`;
   }
 
   /**
