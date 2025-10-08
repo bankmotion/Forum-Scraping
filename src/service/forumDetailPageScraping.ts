@@ -1247,13 +1247,45 @@ class ForumDetailPageScraper {
     posts: PostData[]
   ): Promise<void> {
     try {
-      // Process all media - UPDATED: Process ALL posts
-      const postMediaMap = await this.processPageMedia(posts, threadId);
-
       // UPDATED: Process ALL posts, not just new ones
       const allPosts = posts;
 
       console.log(`Processing ${allPosts.length} posts for thread ${threadId}`);
+
+      // Delete existing S3 image files and database records BEFORE uploading new media
+      for (const postData of allPosts) {
+        // Only delete if the post has media to upload
+        if (postData.medias && postData.medias.length > 0) {
+          // Delete existing S3 image files for this post
+          try {
+            await deleteS3ImagesByThreadAndPost(threadId, postData.postId);
+          } catch (error) {
+            console.error(
+              `Failed to delete S3 images for thread ${threadId}, post ${postData.postId}:`,
+              error
+            );
+          }
+
+          // Delete existing media records from database for this post
+          try {
+            await ForumMedia.destroy({
+              where: {
+                postId: postData.postId,
+                threadId: threadId,
+                type: "img",
+              },
+            });
+          } catch (error) {
+            console.error(
+              `Failed to delete media records for thread ${threadId}, post ${postData.postId}:`,
+              error
+            );
+          }
+        }
+      }
+
+      // Process all media - UPDATED: Process ALL posts AFTER deletion
+      const postMediaMap = await this.processPageMedia(posts, threadId);
 
       // Save posts and media separately
       const dbPromises: Promise<any>[] = [];
@@ -1275,27 +1307,6 @@ class ForumDetailPageScraper {
       // Save media data to ForumMedia table - only for successfully uploaded S3 files
       for (const postData of allPosts) {
         const processedMedias = postMediaMap.get(postData.postId) || [];
-
-        // Delete existing S3 image files for this post before saving new ones
-        try {
-          await deleteS3ImagesByThreadAndPost(threadId, postData.postId);
-        } catch (error) {
-          console.error(
-            `Failed to delete S3 images for thread ${threadId}, post ${postData.postId}:`,
-            error
-          );
-        }
-
-        // Delete existing media records from database for this post before saving new ones
-        dbPromises.push(
-          ForumMedia.destroy({
-            where: {
-              postId: postData.postId,
-              threadId: threadId,
-              type: "img",
-            },
-          })
-        );
 
         for (const mediaData of processedMedias) {
           const { s3Url, hasThumbnail } = mediaData;
