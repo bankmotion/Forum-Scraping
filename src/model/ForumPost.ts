@@ -11,8 +11,8 @@ export class ForumPost extends Model {
   postId!: number;
 
   @ForeignKey(() => ForumThread)
-  @Column(DataType.STRING)
-  threadId!: string;
+  @Column(DataType.INTEGER)
+  threadId!: number;
 
   @Column(DataType.STRING)
   author!: string;
@@ -20,6 +20,9 @@ export class ForumPost extends Model {
   @Column(DataType.TEXT)
   content!: string;
 
-  @Column(DataType.TEXT)
-  medias!: string; // JSON string array of image/video URLs
+  @Column(DataType.STRING)
+  postCreatedDate!: string;
+
+  @Column(DataType.INTEGER)
+  likes!: number;
 } 

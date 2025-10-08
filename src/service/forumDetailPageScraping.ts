@@ -1,12 +1,14 @@
 import puppeteer, { Browser, Page, LaunchOptions } from "puppeteer";
 import { ForumThread } from "../model/ForumThread";
 import { ForumPost } from "../model/ForumPost";
+import { ForumMedia } from "../model/ForumMedia";
 import { sequelize } from "../config/database";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import dotenv from "dotenv";
 import { S3Service } from "./s3Service";
+import { deleteS3ImagesByThreadAndPost } from "./s3FileList";
 import {
   createTempUserDataDir,
   deleteTempUserDataDir,
@@ -19,19 +21,22 @@ import {
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 dotenv.config();
 
-interface PostData {
+export interface PostData {
   postId: number;
   author: string;
   content: string;
-  medias: string[];
+  postCreatedDate: string;
+  likes: number;
+  medias: [string, string][]; // [fullImageUrl, thumbImageUrl] pairs
 }
 
 interface MediaTask {
   url: string;
   postId: number;
-  threadId: string;
+  threadId: number;
   key: string;
   extension?: string; // Optional file extension for attachment pages
+  existThumb: number; // 0 for full image, 1 for thumbnail
 }
 
 interface LoginCredentials {
@@ -51,15 +56,6 @@ class ForumDetailPageScraper {
   private pagesScraped: number = 0;
   private readonly PAGES_BEFORE_RESTART: number = 20; // Changed from 100 to 20
   private tempDir: string = "";
-
-  // Batch processing configuration
-  private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "30");
-  private readonly DOWNLOAD_BATCH_SIZE = parseInt(
-    process.env.DOWNLOAD_BATCH_SIZE || "30"
-  );
-  private readonly UPLOAD_BATCH_SIZE = parseInt(
-    process.env.UPLOAD_BATCH_SIZE || "30"
-  );
 
   // Node distribution configuration
   private readonly NODE_INDEX = parseInt(process.env.NODE_INDEX || "0");
@@ -139,6 +135,13 @@ class ForumDetailPageScraper {
    */
   private isImageOrVideo(url: string): boolean {
     return this.isImageUrl(url) || this.isVideoUrl(url);
+  }
+
+  /**
+   * Helper method to determine if a URL is a thumbnail
+   */
+  private isThumbnailUrl(url: string): boolean {
+    return url.endsWith("_thumb");
   }
 
   /**
@@ -634,9 +637,8 @@ class ForumDetailPageScraper {
 
       // Filter threads based on node distribution using modulo operation
       const nodeThreads = allThreads.filter((thread) => {
-        // Convert threadId to number for modulo operation
-        const threadIdNum = parseInt(thread.threadId);
-        return threadIdNum % this.NODE_COUNT === this.NODE_INDEX;
+        // threadId is already a number
+        return thread.threadId % this.NODE_COUNT === this.NODE_INDEX;
       });
 
       console.log(
@@ -656,7 +658,7 @@ class ForumDetailPageScraper {
 
   async scrapeThreadDetailPage(thread: ForumThread): Promise<void> {
     try {
-      console.log(`Scraping detail page for thread: ${thread.title}`);
+      console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Scraping detail page for thread: ${thread.threadId}`);
 
       // Clean and construct the URL
       let cleanUrl = thread.threadUrl;
@@ -683,15 +685,9 @@ class ForumDetailPageScraper {
       const totalPages = await this.getTotalPages(fullUrl);
       console.log(`Thread has ${totalPages} pages`);
 
-      // Get all existing posts for this thread
-      const existingPosts = await ForumPost.findAll({
-        where: { threadId: thread.threadId },
-        attributes: ["postId", "medias"],
-      });
-
       // Scrape all pages and save after each page
       for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-        console.log(`Scraping page ${pageNum} of ${totalPages}...`);
+        console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Scraping page ${pageNum} of ${totalPages}...`);
 
         // Handle URL structure: /threads/title.id/page-X or just /threads/title.id/ for page 1
         const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
@@ -719,7 +715,7 @@ class ForumDetailPageScraper {
           const posts = await this.scrapePagePosts();
 
           // Save posts to database with batch processing
-          await this.savePostsToDatabase(thread.threadId, posts, existingPosts);
+          await this.savePostsToDatabase(thread.threadId, posts);
 
           // Clear memory cache after each page is processed
           await this.clearPageMemoryCache();
@@ -798,7 +794,7 @@ class ForumDetailPageScraper {
       const posts = await this.page!.evaluate(() => {
         const document = (globalThis as any).document;
         const postElements = document.querySelectorAll(".message");
-        const posts: any[] = [];
+        const posts: PostData[] = [];
 
         postElements.forEach((element: any) => {
           try {
@@ -846,8 +842,47 @@ class ForumDetailPageScraper {
             );
             const content = contentElement?.textContent?.trim() || "";
 
+            // Extract post created date from time element's title attribute
+            let postCreatedDate = "";
+            const timeElement = element.querySelector("time.u-dt[title]");
+            if (timeElement) {
+              const title = timeElement.getAttribute("title");
+              if (title) {
+                // Parse the title format "Oct 5, 2025 at 5:03 PM"
+                // and convert to "2024-01-24T19:34:34-0500" format
+                const datetimeAttr = timeElement.getAttribute("datetime");
+                if (datetimeAttr) {
+                  // Use the datetime attribute which is already in ISO format
+                  postCreatedDate = datetimeAttr;
+                }
+              }
+            }
+
+            // Extract likes count
+            let likes = 0;
+            const reactionsLink = element.querySelector(
+              '.reactionsBar-link[href*="/reactions"]'
+            );
+            if (reactionsLink) {
+              const text = reactionsLink.textContent || "";
+              
+              // Check for "and X other person/people" pattern
+              const otherMatch = text.match(/and\s+(\d+)\s+other/);
+              
+              if (otherMatch) {
+                // Count named people (split by comma) + "and X others"
+                const namedPeople = text.split(",").length;
+                const otherCount = parseInt(otherMatch[1]);
+                likes = namedPeople + otherCount;
+              } else {
+                // No "and X others", just count comma-separated names
+                likes = text.split(",").length;
+              }
+            }
+
             // Extract media (images and videos) - UPDATED LOGIC
-            const medias: string[] = [];
+            // Each media is a pair: [fullImageUrl, thumbImageUrl] where thumb can be empty
+            const medias: [string, string][] = [];
 
             // Get attachments from message-attachments section
             const attachmentSection = element.querySelector(
@@ -864,38 +899,40 @@ class ForumDetailPageScraper {
                   const fullUrl = href.startsWith("http")
                     ? href
                     : `https://www.lpsg.com${href}`;
-                  medias.push(fullUrl);
+
+                  // Check if this <a> tag contains an <img> (thumbnail)
+                  const imgInsideLink = link.querySelector("img[src]");
+                  if (imgInsideLink) {
+                    // If there's a thumbnail inside the link, add both full and thumb
+                    const imgSrc = imgInsideLink.getAttribute("src");
+                    if (imgSrc) {
+                      const thumbUrl = imgSrc.startsWith("http")
+                        ? imgSrc
+                        : `https://www.lpsg.com${imgSrc}`;
+                      // Add pair: [fullUrl, thumbUrl]
+                      medias.push([fullUrl, thumbUrl]);
+                    }
+                  } else {
+                    // No thumbnail found, add full URL with empty thumb
+                    medias.push([fullUrl, ""]);
+                  }
                 }
               });
-
-              if (medias.length === 0) {
-                // Get attachment images (thumbnails) - SECONDARY: Only if no <a href> found
-                const attachmentImages =
-                  attachmentSection.querySelectorAll("img[src]");
-                attachmentImages.forEach((img: any) => {
-                  const src = img.getAttribute("src");
-                  if (
-                    src &&
-                    !src.includes("avatar") &&
-                    !src.includes("smiley") &&
-                    !src.includes("icon")
-                  ) {
-                    // Convert relative URLs to absolute
-                    const fullUrl = src.startsWith("http")
-                      ? src
-                      : `https://www.lpsg.com${src}`;
-                    medias.push(fullUrl);
-                  }
-                });
-              }
             }
 
             // Get images from message content (inline images)
             const contentImages = element.querySelectorAll(
-              ".message-content img[src]"
+              ".message-content img[src], .message-content img[data-src]"
             );
             contentImages.forEach((img: any) => {
-              const src = img.getAttribute("src");
+              // Skip if this image is inside .message-attachments section (already processed)
+              if (img.closest(".message-attachments")) {
+                return;
+              }
+
+              // Try to get src first, then data-src
+              let src = img.getAttribute("src") || img.getAttribute("data-src");
+
               if (
                 src &&
                 !src.includes("avatar") &&
@@ -906,7 +943,9 @@ class ForumDetailPageScraper {
                 const fullUrl = src.startsWith("http")
                   ? src
                   : `https://www.lpsg.com${src}`;
-                medias.push(fullUrl);
+
+                // Regular inline image with empty thumb
+                medias.push([fullUrl, ""]);
               }
             });
 
@@ -920,43 +959,34 @@ class ForumDetailPageScraper {
                 const fullUrl = src.startsWith("http")
                   ? src
                   : `https://www.lpsg.com${src}`;
-                medias.push(fullUrl);
+                // Add video with empty thumb
+                medias.push([fullUrl, ""]);
               }
             });
 
-            // Get embedded videos (YouTube, etc.) from message content
-            const embedElements = element.querySelectorAll(
-              ".message-content iframe[src]"
-            );
-            embedElements.forEach((iframe: any) => {
-              const src = iframe.getAttribute("src");
-              if (src) {
-                medias.push(src);
+            // Remove duplicates from media pairs
+            // Keep only unique pairs based on full image URL
+            const urlMap = new Map<string, [string, string]>();
+
+            for (const [fullUrl, thumbUrl] of medias) {
+              // Use full URL as key for deduplication (or thumb URL if full is empty)
+              const keyUrl = fullUrl || thumbUrl;
+
+              // If we haven't seen this URL before, add the pair
+              if (!urlMap.has(keyUrl)) {
+                urlMap.set(keyUrl, [fullUrl, thumbUrl]);
               }
-            });
+            }
 
-            // Get any other attachment links in the message
-            const allAttachmentLinks = element.querySelectorAll(
-              'a[href*="/attachments/"]'
-            );
-            allAttachmentLinks.forEach((link: any) => {
-              const href = link.getAttribute("href");
-              if (href) {
-                const fullUrl = href.startsWith("http")
-                  ? href
-                  : `https://www.lpsg.com${href}`;
-                medias.push(fullUrl);
-              }
-            });
+            const uniqueMedias = Array.from(urlMap.values());
 
-            // Remove duplicates
-            const uniqueMedias = [...new Set(medias)];
-
-            if (postId && author && content) {
+            if (postId) {
               posts.push({
                 postId,
                 author,
                 content,
+                postCreatedDate,
+                likes,
                 medias: uniqueMedias,
               });
             }
@@ -981,299 +1011,317 @@ class ForumDetailPageScraper {
    * Process all media from a page in streaming batches - UPDATED: Always process posts
    * Downloads a batch, uploads immediately, clears memory, then repeats
    */
-  private async processPageMediaBatch(
+  private async processPageMedia(
     posts: PostData[],
-    threadId: string,
-    existingPostIds: Set<number>
-  ): Promise<Map<number, string[]>> {
-    // UPDATED: Always process all posts, not just new ones
-    const allPosts = posts; // Process all posts, even existing ones
+    threadId: number
+  ): Promise<Map<number, Array<{ s3Url: string; hasThumbnail: boolean }>>> {
+    const allPosts = posts;
+    const postMediaMap = new Map<
+      number,
+      Array<{ s3Url: string; hasThumbnail: boolean }>
+    >();
 
-    // Collect all media tasks from ALL posts
-    const allMediaTasks: MediaTask[] = [];
-    const postMediaMap = new Map<number, string[]>();
+    // Collect all media tasks for the entire page
+    const allMediaTasks: Array<{
+      postId: number;
+      fullSizeUrl: string;
+      thumbUrl: string;
+      fullKey: string;
+      thumbKey: string;
+    }> = [];
 
+    // Prepare all media tasks with unique IDs per post
     for (const post of allPosts) {
-      const processedMedias: string[] = [];
+      let uniqueId = 0; // Reset unique ID for each post
 
-      for (const mediaUrl of post.medias) {
-        // Handle both raw images and LPSG attachment pages
-        if (this.isImageUrl(mediaUrl) || this.isNotRawImg(mediaUrl)) {
-          let key: string;
+      for (const [fullUrl, thumbUrl] of post.medias) {
+        // Only process if we have at least one URL (full or thumb)
+        if (fullUrl || thumbUrl) {
+          // Generate keys for both full and thumb images
+          const baseUrl = fullUrl || thumbUrl;
+          let fullKey: string;
+          let thumbKey: string;
           let extension: string | undefined;
 
-          if (this.isNotRawImg(mediaUrl)) {
-            // For attachment pages, we need to extract the extension and modify the key
-            extension = this.extractFileExtensionFromAttachmentUrl(mediaUrl);
-            // Generate key with the proper extension
-            key = this.s3Service.generateKeyWithExtension(
-              mediaUrl,
+          if (this.isNotRawImg(baseUrl)) {
+            // For attachment pages, we need to extract the extension
+            extension = this.extractFileExtensionFromAttachmentUrl(baseUrl);
+
+            // Generate full image key
+            fullKey = this.s3Service.generateKeyWithExtension(
+              baseUrl,
               threadId,
               post.postId,
-              extension
+              extension,
+              false, // Full image
+              uniqueId
+            );
+
+            // Generate thumbnail key
+            thumbKey = this.s3Service.generateKeyWithExtension(
+              baseUrl,
+              threadId,
+              post.postId,
+              extension,
+              true, // Thumbnail
+              uniqueId
             );
           } else {
             // For regular images, use the existing method
-            key = this.s3Service.generateKey(mediaUrl, threadId, post.postId);
+
+            // Generate full image key
+            fullKey = this.s3Service.generateKey(
+              baseUrl,
+              threadId,
+              post.postId,
+              false, // Full image
+              uniqueId
+            );
+
+            // Generate thumbnail key
+            thumbKey = this.s3Service.generateKey(
+              baseUrl,
+              threadId,
+              post.postId,
+              true, // Thumbnail
+              uniqueId
+            );
           }
 
           allMediaTasks.push({
-            url: mediaUrl,
             postId: post.postId,
-            threadId: threadId,
-            key: key,
-            extension: extension,
+            fullSizeUrl: fullUrl || "",
+            thumbUrl: thumbUrl || "",
+            fullKey,
+            thumbKey,
           });
-          processedMedias.push(mediaUrl); // Keep original URL for now
         }
+
+        uniqueId++; // Increment unique ID for next media in this post
+      }
+    }
+
+    console.log(`Processing ${allMediaTasks.length} media files for page...`);
+
+    // Create individual upload tasks for full and thumb images
+    const uploadTasks: Array<{
+      postId: number;
+      url: string;
+      key: string;
+      isThumb: number;
+      hasThumb: boolean;
+    }> = [];
+
+    for (const task of allMediaTasks) {
+      // Check if this media pair has a thumbnail
+      const hasThumb = !!task.thumbUrl;
+
+      // Add full image task if URL exists
+      if (task.fullSizeUrl) {
+        uploadTasks.push({
+          postId: task.postId,
+          url: task.fullSizeUrl,
+          key: task.fullKey, // Full image key
+          isThumb: 0,
+          hasThumb: hasThumb,
+        });
       }
 
-      postMediaMap.set(post.postId, processedMedias);
-    }
-
-    if (allMediaTasks.length === 0) {
-      return postMediaMap;
-    }
-
-    // Process in streaming batches: download -> upload -> clear memory -> repeat
-    const uploadResults = await this.processStreamingBatches(allMediaTasks);
-    console.log(`Upload results:`, uploadResults.size);
-
-    // Update post media map with S3 URLs
-    for (const [postId, originalUrls] of postMediaMap.entries()) {
-      const updatedUrls: string[] = [];
-
-      for (const originalUrl of originalUrls) {
-        const uploadResult = uploadResults.get(originalUrl);
-        if (uploadResult && uploadResult.success) {
-          updatedUrls.push(uploadResult.s3Url!);
-        } else {
-          // Keep original URL if upload failed
-          updatedUrls.push(originalUrl);
-        }
+      // Add thumbnail task if URL exists
+      if (task.thumbUrl) {
+        uploadTasks.push({
+          postId: task.postId,
+          url: task.thumbUrl,
+          key: task.thumbKey, // Thumbnail key
+          isThumb: 1,
+          hasThumb: hasThumb,
+        });
       }
-
-      postMediaMap.set(postId, updatedUrls);
     }
 
-    return postMediaMap;
-  }
+    // Process all upload tasks in parallel
+    const processingPromises = uploadTasks.map(async (uploadTask) => {
+      try {
+        let buffer: Buffer | null = null;
 
-  /**
-   * Process media in streaming batches to prevent memory overflow
-   * Downloads a batch, uploads immediately, clears memory, then repeats
-   */
-  private async processStreamingBatches(
-    mediaTasks: MediaTask[]
-  ): Promise<Map<string, { success: boolean; s3Url?: string }>> {
-    const uploadResults = new Map<
-      string,
-      { success: boolean; s3Url?: string }
-    >();
-
-    let i = 0;
-    let batchNumber = 1;
-    console.log(`mediaTasks:`, mediaTasks.length);
-
-    while (i < mediaTasks.length) {
-      // Create batch of 5 files (or remaining files if less than 5)
-      const batch = mediaTasks.slice(i, i + this.BATCH_SIZE);
-      const totalBatches = Math.ceil(mediaTasks.length / this.BATCH_SIZE);
-
-      console.log(
-        `Processing streaming batch ${batchNumber}/${totalBatches} (${batch.length} files)`
-      );
-
-      // Step 1: Download batch
-      const downloadResults = new Map<string, Buffer>();
-      let totalDownloadedSize = 0;
-
-      const downloadPromises = batch.map(async (task) => {
-        try {
-          let buffer: Buffer | null = null;
-
-          // Check if it's an attachment page that needs special handling
-          if (this.isNotRawImg(task.url)) {
-            const result = await this.downloadFromAttachmentPage(task.url);
-            if (!result) {
-              console.error(
-                `✗ Failed to download from attachment page: ${task.url}`
-              );
-              return;
-            }
+        // Check if it's an attachment page that needs special handling
+        if (this.isNotRawImg(uploadTask.url)) {
+          const result = await this.downloadFromAttachmentPage(uploadTask.url);
+          if (result) {
             buffer = result.buffer;
-          } else {
-            // Regular image download
-            buffer = await this.s3Service.downloadFile(task.url);
           }
-
-          if (buffer) {
-            downloadResults.set(task.url, buffer);
-            totalDownloadedSize += buffer.length;
-            console.log(
-              `✓ Downloaded: ${task.url} (${(
-                buffer.length /
-                1024 /
-                1024
-              ).toFixed(1)}MB)`
-            );
-          }
-        } catch (error) {
-          console.error(`✗ Download failed: ${task.url}`);
+        } else {
+          // Regular image download
+          buffer = await this.s3Service.downloadFile(uploadTask.url);
         }
-      });
 
-      await Promise.allSettled(downloadPromises);
-
-      console.log(
-        `📊 Batch total size: ${(totalDownloadedSize / 1024 / 1024).toFixed(
-          1
-        )}MB`
-      );
-
-      // Step 2: Upload batch immediately
-      const uploadPromises = batch.map(async (task) => {
-        try {
-          const buffer = downloadResults.get(task.url);
-          if (!buffer) {
-            // console.error(`✗ No buffer found for: ${task.url}`);
-            uploadResults.set(task.url, { success: false });
-            return;
-          }
-
-          const contentType = this.s3Service.getContentType(task.url);
-
+        if (buffer) {
+          const contentType = this.s3Service.getContentType(uploadTask.url);
           const uploadCommand = new PutObjectCommand({
             Bucket: this.s3Service.bucketName,
-            Key: task.key,
+            Key: uploadTask.key,
             Body: buffer,
             ContentType: contentType,
             Metadata: {
-              "original-url": task.url,
+              "original-url": uploadTask.url,
               "upload-timestamp": new Date().toISOString(),
-              "thread-id": task.threadId,
-              "post-id": task.postId.toString(),
+              "thread-id": threadId.toString(),
+              "post-id": uploadTask.postId.toString(),
+              "is-thumb": uploadTask.isThumb.toString(),
+              "has-thumb": uploadTask.hasThumb.toString(),
             },
           });
 
           await this.s3Service.s3Client.send(uploadCommand);
+          const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
+            process.env.S3_REGION || "us-east-2"
+          }.wasabisys.com/${uploadTask.key}`;
 
-          const s3Url = `https://${this.s3Service.bucketName}.s3.${process.env.S3_REGION}.wasabisys.com/${task.key}`;
-          uploadResults.set(task.url, { success: true, s3Url });
-        } catch (error) {
-          console.error(`✗ Upload failed: ${task.url}`, error);
-          uploadResults.set(task.url, { success: false });
+          console.log(
+            `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
+          );
+          return {
+            postId: uploadTask.postId,
+            originalUrl: uploadTask.url,
+            s3Url: finalS3Url,
+            isThumb: uploadTask.isThumb,
+            hasThumb: uploadTask.hasThumb,
+            success: true,
+          };
+        } else {
+          console.error(`✗ Failed to download: ${uploadTask.url}`);
+          return {
+            postId: uploadTask.postId,
+            originalUrl: uploadTask.url,
+            s3Url: uploadTask.url,
+            isThumb: uploadTask.isThumb,
+            hasThumb: uploadTask.hasThumb,
+            success: false,
+          };
         }
-      });
-
-      await Promise.allSettled(uploadPromises);
-
-      // Step 3: Clear memory immediately after upload
-      downloadResults.clear();
-
-      // Force garbage collection if available
-      if (global.gc) {
-        global.gc();
+      } catch (error) {
+        console.error(`✗ Processing failed for ${uploadTask.url}:`, error);
+        return {
+          postId: uploadTask.postId,
+          originalUrl: uploadTask.url,
+          s3Url: uploadTask.url,
+          isThumb: uploadTask.isThumb,
+          hasThumb: uploadTask.hasThumb,
+          success: false,
+        };
       }
+    });
 
-      console.log(
-        `✓ Completed streaming batch ${batchNumber}/${totalBatches} - memory cleared (${(
-          totalDownloadedSize /
-          1024 /
-          1024
-        ).toFixed(1)}MB processed)`
-      );
+    // Wait for all processing to complete
+    const results = await Promise.allSettled(processingPromises);
 
-      // Move to next batch
-      i += this.BATCH_SIZE;
-      batchNumber++;
+    // Group results by post ID and track thumbnail existence
+    const postResults = new Map<
+      number,
+      Array<{ s3Url: string; hasThumbnail: boolean }>
+    >();
 
-      // Small delay between batches to allow memory cleanup
-      if (i < mediaTasks.length) {
-        await this.delay(500);
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value) {
+        const { postId, s3Url, isThumb, success, hasThumb } = result.value;
+
+        // Only process full images (existThumb: 0) and successful uploads
+        if (success && isThumb === 0) {
+          if (!postResults.has(postId)) {
+            postResults.set(postId, []);
+          }
+          postResults.get(postId)!.push({ s3Url, hasThumbnail: hasThumb });
+        }
       }
     }
 
-    const successCount = Array.from(uploadResults.values()).filter(
-      (r) => r.success
-    ).length;
-    console.log(
-      `Streaming batch process completed: ${successCount}/${mediaTasks.length} files processed successfully`
-    );
-
-    return uploadResults;
+    console.log(`✓ Completed processing media files for page`);
+    return postResults;
   }
 
   /**
-   * UPDATED savePostsToDatabase method - Always process posts and replace only image URLs
+   * UPDATED savePostsToDatabase method - Save posts and media data separately
    */
   private async savePostsToDatabase(
-    threadId: string,
-    posts: PostData[],
-    existingPosts: ForumPost[]
+    threadId: number,
+    posts: PostData[]
   ): Promise<void> {
     try {
-      // Create a map of existing post IDs for quick lookup
-      const existingPostIds = new Set(existingPosts.map((post) => post.postId));
-
-      console.log(
-        `Found ${existingPostIds.size} existing posts for thread ${threadId}`
-      );
-
-      // Process all media in batches - UPDATED: Process ALL posts
-      const postMediaMap = await this.processPageMediaBatch(
-        posts,
-        threadId,
-        existingPostIds
-      );
+      // Process all media - UPDATED: Process ALL posts
+      const postMediaMap = await this.processPageMedia(posts, threadId);
 
       // UPDATED: Process ALL posts, not just new ones
       const allPosts = posts;
 
       console.log(`Processing ${allPosts.length} posts for thread ${threadId}`);
 
-      // Save ALL posts to database after batch processing is complete
-      const dbPromises = allPosts.map(async (postData) => {
+      // Save posts and media separately
+      const dbPromises: Promise<any>[] = [];
+
+      // Save/update posts (without medias field)
+      allPosts.forEach((postData) => {
+        dbPromises.push(
+          ForumPost.upsert({
+            postId: postData.postId,
+            threadId: threadId,
+            author: postData.author,
+            content: postData.content,
+            postCreatedDate: postData.postCreatedDate,
+            likes: postData.likes,
+          })
+        );
+      });
+
+      // Save media data to ForumMedia table - only for successfully uploaded S3 files
+      for (const postData of allPosts) {
         const processedMedias = postMediaMap.get(postData.postId) || [];
 
-        // UPDATED: For existing posts, replace only image URLs, preserve video URLs
-        if (existingPostIds.has(postData.postId)) {
-          const existingPost = existingPosts.find(
-            (p) => p.postId === postData.postId
+        // Delete existing S3 image files for this post before saving new ones
+        try {
+          await deleteS3ImagesByThreadAndPost(threadId, postData.postId);
+        } catch (error) {
+          console.error(
+            `Failed to delete S3 images for thread ${threadId}, post ${postData.postId}:`,
+            error
           );
-          if (existingPost) {
-            const existingMedias = JSON.parse(existingPost.medias || "[]");
-            const newImageUrls = processedMedias.filter((url) =>
-              this.isImageUrl(url)
-            );
-            const existingVideoUrls = existingMedias.filter((url: string) =>
-              this.isVideoUrl(url)
-            );
+        }
 
-            // Combine new image URLs with existing video URLs
-            const finalMedias = [...newImageUrls, ...existingVideoUrls];
-
-            await ForumPost.upsert({
+        // Delete existing media records from database for this post before saving new ones
+        dbPromises.push(
+          ForumMedia.destroy({
+            where: {
               postId: postData.postId,
               threadId: threadId,
-              author: postData.author,
-              content: postData.content,
-              medias: JSON.stringify(finalMedias),
-            });
-          }
-        } else {
-          // New posts: save all media
-          if (processedMedias.length > 0) {
-            await ForumPost.upsert({
-              postId: postData.postId,
-              threadId: threadId,
-              author: postData.author,
-              content: postData.content,
-              medias: JSON.stringify(processedMedias),
-            });
+              type: "img",
+            },
+          })
+        );
+
+        for (const mediaData of processedMedias) {
+          const { s3Url, hasThumbnail } = mediaData;
+
+          // Only save media that is an S3 bucket URL (successfully uploaded)
+          if (s3Url.includes("s3.") && s3Url.includes("wasabisys.com")) {
+            const mediaType = this.isImageUrl(s3Url)
+              ? "img"
+              : this.isVideoUrl(s3Url)
+              ? "mov"
+              : null;
+
+            if (mediaType && !s3Url.includes("_thumb")) {
+              dbPromises.push(
+                ForumMedia.create({
+                  threadId: threadId,
+                  postId: postData.postId,
+                  link: s3Url,
+                  type: mediaType, // Always use the original media type (img/mov)
+                  existThumb: hasThumbnail ? 1 : 0, // 1 if thumbnail exists, 0 if not
+                })
+              );
+            }
           }
         }
-      });
+      }
 
       await Promise.allSettled(dbPromises);
 
@@ -1435,7 +1483,7 @@ class ForumDetailPageScraper {
 
       // Find the thread by ID
       const thread = await ForumThread.findOne({
-        where: { threadId: threadId.toString() },
+        where: { threadId: threadId },
       });
 
       if (!thread) {
@@ -1454,7 +1502,7 @@ class ForumDetailPageScraper {
 
       // Return the updated thread data
       return await ForumThread.findOne({
-        where: { threadId: threadId.toString() },
+        where: { threadId: threadId },
       });
     } catch (error) {
       console.error(`Error in runDetailPage for thread ${threadId}:`, error);

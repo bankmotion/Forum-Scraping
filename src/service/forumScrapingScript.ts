@@ -6,7 +6,7 @@ import { ForumThread } from "../model/ForumThread";
 dotenv.config();
 
 interface ForumThreadData {
-  threadId: string;
+  threadId: number;
   title: string;
   creator: string;
   creationDate: string;
@@ -372,10 +372,12 @@ class ForumScraper {
             threadElements.forEach((element: any) => {
               try {
                 // Extract thread ID from data attribute
-                const threadId =
+                const threadIdStr =
                   element.getAttribute("data-thread-id") ||
                   element.className.match(/js-threadListItem-(\d+)/)?.[1] ||
                   "";
+                
+                const threadId = parseInt(threadIdStr) || 0;
 
                 const titleElement = element.querySelector(
                   ".structItem-title a"
@@ -418,7 +420,7 @@ class ForumScraper {
                 const lastReplier =
                   lastReplierElement?.textContent?.trim() || "";
 
-                if (title && threadId) {
+                if (title && threadId > 0) {
                   threads.push({
                     threadId,
                     title,

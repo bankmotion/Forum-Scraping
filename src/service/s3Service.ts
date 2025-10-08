@@ -15,7 +15,7 @@ import dotenv from "dotenv";
 interface UploadTask {
   url: string;
   key: string;
-  threadId: string;
+  threadId: number;
   postId: number;
   retryCount?: number;
 }
@@ -118,7 +118,7 @@ export class S3Service {
    */
   async uploadMediaUrls(
     medias: string[],
-    threadId: string,
+    threadId: number,
     postId: number
   ): Promise<string[]> {
     console.log(`Starting concurrent upload of ${medias.length} media files for post ${postId}`);
@@ -228,7 +228,7 @@ export class S3Service {
         Metadata: {
           "original-url": task.url,
           "upload-timestamp": new Date().toISOString(),
-          "thread-id": task.threadId,
+          "thread-id": task.threadId.toString(),
           "post-id": task.postId.toString(),
         },
       });
@@ -363,39 +363,57 @@ export class S3Service {
    */
   generateKey(
     originalUrl: string,
-    threadId: string,
-    postId: number
+    threadId: number,
+    postId: number,
+    isThumbnail: boolean = false,
+    uniqueId: number = 0
   ): string {
     const url = new URL(originalUrl);
     const pathParts = url.pathname.split("/");
     const filename = pathParts[pathParts.length - 1] || "media";
     const extension = filename.split(".").pop() || "jpg";
+    
+    // Remove extension from filename to add _thumb before extension
+    let baseFilename = filename.replace(`.${extension}`, "");
+    
+    // Remove "-media" from the filename for full images, but keep it for thumbnails
+    if (!isThumbnail && baseFilename.includes("-media")) {
+      baseFilename = baseFilename.replace("-media", "");
+    }
 
-    // Generate unique key: forum-media/threadId/postId/timestamp-filename
-    const timestamp = Date.now();
-    return `forum-media/${threadId}/${postId}/${timestamp}-${filename}`;
+    // Generate unique key: forum-media/threadId/postId/uniqueId-filename[_thumb].extension
+    const thumbSuffix = isThumbnail ? "_thumb" : "";
+    return `forum-media/${threadId}/${postId}/${uniqueId}-${baseFilename}${thumbSuffix}.${extension}`;
   }
 
   generateKeyWithExtension(
     originalUrl: string,
-    threadId: string,
+    threadId: number,
     postId: number,
-    extension: string
+    extension: string,
+    isThumbnail: boolean = false,
+    uniqueId: number = 0
   ): string {
     // const url = new URL(originalUrl);
     const pathParts = originalUrl.split("/");
     const filename = pathParts[pathParts.length - 1] || "media";
     
     // Remove any existing extension and add the specified one
-    const baseFilename = filename.split(".")[0] || "media";
+    let baseFilename = filename.split(".")[0] || "media";
+    
+    // Remove "-media" from the filename for full images, but keep it for thumbnails
+    if (!isThumbnail && baseFilename.includes("-media")) {
+      baseFilename = baseFilename.replace("-media", "");
+    }
+    
     const sanitizedFilename = baseFilename.replace(/[^a-zA-Z0-9.-]/g, "_");
     
     // Ensure extension starts with dot
     const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
     
-    // Generate unique key: forum-media/threadId/postId/timestamp-filename.extension
-    const timestamp = Date.now();
-    return `forum-media/${threadId}/${postId}/${timestamp}-${sanitizedFilename}${normalizedExtension}`;
+    // Generate unique key: forum-media/threadId/postId/uniqueId-filename[_thumb].extension
+    const thumbSuffix = isThumbnail ? "_thumb" : "";
+    return `forum-media/${threadId}/${postId}/${uniqueId}-${sanitizedFilename}${thumbSuffix}${normalizedExtension}`;
   }
 
   /**

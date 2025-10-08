@@ -6,8 +6,8 @@ import { Table, Column, Model, PrimaryKey, DataType } from 'sequelize-typescript
 })
 export class ForumThread extends Model {
   @PrimaryKey
-  @Column(DataType.STRING)
-  threadId!: string;
+  @Column(DataType.INTEGER)
+  threadId!: number;
 
   @Column(DataType.TEXT)
   title!: string;
