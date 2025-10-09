@@ -1239,7 +1239,7 @@ class ForumDetailPageScraper {
         `Processing ${posts.length} posts for thread ${threadId} (batch size: 30)`
       );
 
-      const BATCH_SIZE = 30;
+      const BATCH_SIZE = 10;
       let totalProcessed = 0;
 
       await ForumMedia.destroy({
