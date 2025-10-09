@@ -18,6 +18,7 @@ import {
   delay,
 } from "../utils";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { Op } from "sequelize";
 dotenv.config();
 
 export interface PostData {
@@ -657,7 +658,11 @@ class ForumDetailPageScraper {
 
   async scrapeThreadDetailPage(thread: ForumThread): Promise<void> {
     try {
-      console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Scraping detail page for thread: ${thread.threadId}`);
+      console.log(
+        `Node ${this.NODE_INDEX}/${
+          this.NODE_COUNT - 1
+        }: Scraping detail page for thread: ${thread.threadId}`
+      );
 
       // Clean and construct the URL
       let cleanUrl = thread.threadUrl;
@@ -686,7 +691,11 @@ class ForumDetailPageScraper {
 
       // Scrape all pages and save after each page
       for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-        console.log(`Node ${this.NODE_INDEX}/${this.NODE_COUNT - 1}: Scraping page ${pageNum} of ${totalPages}...`);
+        console.log(
+          `Node ${this.NODE_INDEX}/${
+            this.NODE_COUNT - 1
+          }: Scraping page ${pageNum} of ${totalPages}...`
+        );
 
         // Handle URL structure: /threads/title.id/page-X or just /threads/title.id/ for page 1
         const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
@@ -864,10 +873,10 @@ class ForumDetailPageScraper {
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
-              
+
               // Check for "and X other person/people" pattern
               const otherMatch = text.match(/and\s+(\d+)\s+other/);
-              
+
               if (otherMatch) {
                 // Count named people (split by comma) + "and X others"
                 const namedPeople = text.split(",").length;
@@ -1232,6 +1241,16 @@ class ForumDetailPageScraper {
 
       const BATCH_SIZE = 30;
       let totalProcessed = 0;
+
+      await ForumMedia.destroy({
+        where: {
+          threadId: threadId,
+          type: "img",
+          postId: {
+            [Op.in]: posts.map((post) => post.postId),
+          },
+        },
+      });
 
       // Process posts in batches of 30
       for (let i = 0; i < posts.length; i += BATCH_SIZE) {
