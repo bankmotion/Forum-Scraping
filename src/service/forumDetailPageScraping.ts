@@ -949,19 +949,19 @@ class ForumDetailPageScraper {
             });
 
             // Get videos from message content
-            const videoElements = element.querySelectorAll(
-              ".message-content video source, .message-content video[src]"
-            );
-            videoElements.forEach((video: any) => {
-              const src = video.getAttribute("src");
-              if (src) {
-                const fullUrl = src.startsWith("http")
-                  ? src
-                  : `https://www.lpsg.com${src}`;
-                // Add video with empty thumb
-                medias.push([fullUrl, ""]);
-              }
-            });
+            // const videoElements = element.querySelectorAll(
+            //   ".message-content video source, .message-content video[src]"
+            // );
+            // videoElements.forEach((video: any) => {
+            //   const src = video.getAttribute("src");
+            //   if (src) {
+            //     const fullUrl = src.startsWith("http")
+            //       ? src
+            //       : `https://www.lpsg.com${src}`;
+            //     // Add video with empty thumb
+            //     medias.push([fullUrl, ""]);
+            //   }
+            // });
 
             // Remove duplicates from media pairs
             // Keep only unique pairs based on full image URL
