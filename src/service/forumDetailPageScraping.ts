@@ -8,7 +8,6 @@ import * as path from "path";
 import * as os from "os";
 import dotenv from "dotenv";
 import { S3Service } from "./s3Service";
-import { deleteS3ImagesByThreadAndPost } from "./s3FileList";
 import {
   createTempUserDataDir,
   deleteTempUserDataDir,
@@ -1008,20 +1007,19 @@ class ForumDetailPageScraper {
   }
 
   /**
-   * Process all media from a page in streaming batches - UPDATED: Always process posts
-   * Downloads a batch, uploads immediately, clears memory, then repeats
+   * Process media for a batch of posts (30 posts per batch)
+   * Downloads and uploads all media in parallel for better performance
    */
-  private async processPageMedia(
+  private async processBatchMedia(
     posts: PostData[],
     threadId: number
   ): Promise<Map<number, Array<{ s3Url: string; hasThumbnail: boolean }>>> {
-    const allPosts = posts;
     const postMediaMap = new Map<
       number,
       Array<{ s3Url: string; hasThumbnail: boolean }>
     >();
 
-    // Collect all media tasks for the entire page
+    // Collect all media tasks for the batch
     const allMediaTasks: Array<{
       postId: number;
       fullSizeUrl: string;
@@ -1030,60 +1028,51 @@ class ForumDetailPageScraper {
       thumbKey: string;
     }> = [];
 
-    // Prepare all media tasks with unique IDs per post
-    for (const post of allPosts) {
-      let uniqueId = 0; // Reset unique ID for each post
+    // Prepare all media tasks
+    for (const post of posts) {
+      let uniqueId = 0;
 
       for (const [fullUrl, thumbUrl] of post.medias) {
-        // Only process if we have at least one URL (full or thumb)
         if (fullUrl || thumbUrl) {
-          // Generate keys for both full and thumb images
           const baseUrl = fullUrl || thumbUrl;
           let fullKey: string;
           let thumbKey: string;
           let extension: string | undefined;
 
           if (this.isNotRawImg(baseUrl)) {
-            // For attachment pages, we need to extract the extension
             extension = this.extractFileExtensionFromAttachmentUrl(baseUrl);
 
-            // Generate full image key
             fullKey = this.s3Service.generateKeyWithExtension(
               baseUrl,
               threadId,
               post.postId,
               extension,
-              false, // Full image
+              false,
               uniqueId
             );
 
-            // Generate thumbnail key
             thumbKey = this.s3Service.generateKeyWithExtension(
               baseUrl,
               threadId,
               post.postId,
               extension,
-              true, // Thumbnail
+              true,
               uniqueId
             );
           } else {
-            // For regular images, use the existing method
-
-            // Generate full image key
             fullKey = this.s3Service.generateKey(
               baseUrl,
               threadId,
               post.postId,
-              false, // Full image
+              false,
               uniqueId
             );
 
-            // Generate thumbnail key
             thumbKey = this.s3Service.generateKey(
               baseUrl,
               threadId,
               post.postId,
-              true, // Thumbnail
+              true,
               uniqueId
             );
           }
@@ -1097,13 +1086,17 @@ class ForumDetailPageScraper {
           });
         }
 
-        uniqueId++; // Increment unique ID for next media in this post
+        uniqueId++;
       }
     }
 
-    console.log(`Processing ${allMediaTasks.length} media files for page...`);
+    if (allMediaTasks.length === 0) {
+      return postMediaMap;
+    }
 
-    // Create individual upload tasks for full and thumb images
+    console.log(`Processing ${allMediaTasks.length} media files in batch...`);
+
+    // Create individual upload tasks
     const uploadTasks: Array<{
       postId: number;
       url: string;
@@ -1113,26 +1106,23 @@ class ForumDetailPageScraper {
     }> = [];
 
     for (const task of allMediaTasks) {
-      // Check if this media pair has a thumbnail
       const hasThumb = !!task.thumbUrl;
 
-      // Add full image task if URL exists
       if (task.fullSizeUrl) {
         uploadTasks.push({
           postId: task.postId,
           url: task.fullSizeUrl,
-          key: task.fullKey, // Full image key
+          key: task.fullKey,
           isThumb: 0,
           hasThumb: hasThumb,
         });
       }
 
-      // Add thumbnail task if URL exists
       if (task.thumbUrl) {
         uploadTasks.push({
           postId: task.postId,
           url: task.thumbUrl,
-          key: task.thumbKey, // Thumbnail key
+          key: task.thumbKey,
           isThumb: 1,
           hasThumb: hasThumb,
         });
@@ -1144,14 +1134,12 @@ class ForumDetailPageScraper {
       try {
         let buffer: Buffer | null = null;
 
-        // Check if it's an attachment page that needs special handling
         if (this.isNotRawImg(uploadTask.url)) {
           const result = await this.downloadFromAttachmentPage(uploadTask.url);
           if (result) {
             buffer = result.buffer;
           }
         } else {
-          // Regular image download
           buffer = await this.s3Service.downloadFile(uploadTask.url);
         }
 
@@ -1182,7 +1170,6 @@ class ForumDetailPageScraper {
           );
           return {
             postId: uploadTask.postId,
-            originalUrl: uploadTask.url,
             s3Url: finalS3Url,
             isThumb: uploadTask.isThumb,
             hasThumb: uploadTask.hasThumb,
@@ -1192,7 +1179,6 @@ class ForumDetailPageScraper {
           console.error(`✗ Failed to download: ${uploadTask.url}`);
           return {
             postId: uploadTask.postId,
-            originalUrl: uploadTask.url,
             s3Url: uploadTask.url,
             isThumb: uploadTask.isThumb,
             hasThumb: uploadTask.hasThumb,
@@ -1203,7 +1189,6 @@ class ForumDetailPageScraper {
         console.error(`✗ Processing failed for ${uploadTask.url}:`, error);
         return {
           postId: uploadTask.postId,
-          originalUrl: uploadTask.url,
           s3Url: uploadTask.url,
           isThumb: uploadTask.isThumb,
           hasThumb: uploadTask.hasThumb,
@@ -1212,233 +1197,29 @@ class ForumDetailPageScraper {
       }
     });
 
-    // Wait for all processing to complete
     const results = await Promise.allSettled(processingPromises);
 
-    // Group results by post ID and track thumbnail existence
-    const postResults = new Map<
-      number,
-      Array<{ s3Url: string; hasThumbnail: boolean }>
-    >();
-
+    // Group results by post ID
     for (const result of results) {
       if (result.status === "fulfilled" && result.value) {
         const { postId, s3Url, isThumb, success, hasThumb } = result.value;
 
-        // Only process full images (existThumb: 0) and successful uploads
         if (success && isThumb === 0) {
-          if (!postResults.has(postId)) {
-            postResults.set(postId, []);
+          if (!postMediaMap.has(postId)) {
+            postMediaMap.set(postId, []);
           }
-          postResults.get(postId)!.push({ s3Url, hasThumbnail: hasThumb });
+          postMediaMap.get(postId)!.push({ s3Url, hasThumbnail: hasThumb });
         }
       }
     }
 
-    console.log(`✓ Completed processing media files for page`);
-    return postResults;
+    console.log(`✓ Completed processing media files for batch`);
+    return postMediaMap;
   }
 
   /**
-   * Process a single post's media
-   * Downloads and uploads media for one post only
-   */
-  private async processSinglePostMedia(
-    post: PostData,
-    threadId: number
-  ): Promise<Array<{ s3Url: string; hasThumbnail: boolean }>> {
-    const mediasResult: Array<{ s3Url: string; hasThumbnail: boolean }> = [];
-
-    // Collect media tasks for this post
-    const mediaTasksForPost: Array<{
-      fullSizeUrl: string;
-      thumbUrl: string;
-      fullKey: string;
-      thumbKey: string;
-    }> = [];
-
-    let uniqueId = 0;
-
-    for (const [fullUrl, thumbUrl] of post.medias) {
-      if (fullUrl || thumbUrl) {
-        const baseUrl = fullUrl || thumbUrl;
-        let fullKey: string;
-        let thumbKey: string;
-        let extension: string | undefined;
-
-        if (this.isNotRawImg(baseUrl)) {
-          extension = this.extractFileExtensionFromAttachmentUrl(baseUrl);
-
-          fullKey = this.s3Service.generateKeyWithExtension(
-            baseUrl,
-            threadId,
-            post.postId,
-            extension,
-            false,
-            uniqueId
-          );
-
-          thumbKey = this.s3Service.generateKeyWithExtension(
-            baseUrl,
-            threadId,
-            post.postId,
-            extension,
-            true,
-            uniqueId
-          );
-        } else {
-          fullKey = this.s3Service.generateKey(
-            baseUrl,
-            threadId,
-            post.postId,
-            false,
-            uniqueId
-          );
-
-          thumbKey = this.s3Service.generateKey(
-            baseUrl,
-            threadId,
-            post.postId,
-            true,
-            uniqueId
-          );
-        }
-
-        mediaTasksForPost.push({
-          fullSizeUrl: fullUrl || "",
-          thumbUrl: thumbUrl || "",
-          fullKey,
-          thumbKey,
-        });
-      }
-
-      uniqueId++;
-    }
-
-    if (mediaTasksForPost.length === 0) {
-      return mediasResult;
-    }
-
-    console.log(
-      `Processing ${mediaTasksForPost.length} media files for post ${post.postId}`
-    );
-
-    // Create individual upload tasks
-    const uploadTasks: Array<{
-      url: string;
-      key: string;
-      isThumb: number;
-      hasThumb: boolean;
-    }> = [];
-
-    for (const task of mediaTasksForPost) {
-      const hasThumb = !!task.thumbUrl;
-
-      if (task.fullSizeUrl) {
-        uploadTasks.push({
-          url: task.fullSizeUrl,
-          key: task.fullKey,
-          isThumb: 0,
-          hasThumb: hasThumb,
-        });
-      }
-
-      if (task.thumbUrl) {
-        uploadTasks.push({
-          url: task.thumbUrl,
-          key: task.thumbKey,
-          isThumb: 1,
-          hasThumb: hasThumb,
-        });
-      }
-    }
-
-    // Process upload tasks for this post
-    const processingPromises = uploadTasks.map(async (uploadTask) => {
-      try {
-        let buffer: Buffer | null = null;
-
-        if (this.isNotRawImg(uploadTask.url)) {
-          const result = await this.downloadFromAttachmentPage(uploadTask.url);
-          if (result) {
-            buffer = result.buffer;
-          }
-        } else {
-          buffer = await this.s3Service.downloadFile(uploadTask.url);
-        }
-
-        if (buffer) {
-          const contentType = this.s3Service.getContentType(uploadTask.url);
-          const uploadCommand = new PutObjectCommand({
-            Bucket: this.s3Service.bucketName,
-            Key: uploadTask.key,
-            Body: buffer,
-            ContentType: contentType,
-            Metadata: {
-              "original-url": uploadTask.url,
-              "upload-timestamp": new Date().toISOString(),
-              "thread-id": threadId.toString(),
-              "post-id": post.postId.toString(),
-              "is-thumb": uploadTask.isThumb.toString(),
-              "has-thumb": uploadTask.hasThumb.toString(),
-            },
-          });
-
-          await this.s3Service.s3Client.send(uploadCommand);
-          const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
-            process.env.S3_REGION || "us-east-2"
-          }.wasabisys.com/${uploadTask.key}`;
-
-          console.log(
-            `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
-          );
-          return {
-            originalUrl: uploadTask.url,
-            s3Url: finalS3Url,
-            isThumb: uploadTask.isThumb,
-            hasThumb: uploadTask.hasThumb,
-            success: true,
-          };
-        } else {
-          console.error(`✗ Failed to download: ${uploadTask.url}`);
-          return {
-            originalUrl: uploadTask.url,
-            s3Url: uploadTask.url,
-            isThumb: uploadTask.isThumb,
-            hasThumb: uploadTask.hasThumb,
-            success: false,
-          };
-        }
-      } catch (error) {
-        console.error(`✗ Processing failed for ${uploadTask.url}:`, error);
-        return {
-          originalUrl: uploadTask.url,
-          s3Url: uploadTask.url,
-          isThumb: uploadTask.isThumb,
-          hasThumb: uploadTask.hasThumb,
-          success: false,
-        };
-      }
-    });
-
-    const results = await Promise.allSettled(processingPromises);
-
-    // Collect full images with thumbnail info
-    for (const result of results) {
-      if (result.status === "fulfilled" && result.value) {
-        const { s3Url, isThumb, success, hasThumb } = result.value;
-
-        if (success && isThumb === 0) {
-          mediasResult.push({ s3Url, hasThumbnail: hasThumb });
-        }
-      }
-    }
-
-    return mediasResult;
-  }
-
-  /**
-   * UPDATED savePostsToDatabase method - Process posts one by one (batch per post)
+   * Save posts to database with batch processing (30 posts per batch)
+   * No S3 deletion - only uploads new media
    */
   private async savePostsToDatabase(
     threadId: number,
@@ -1446,69 +1227,46 @@ class ForumDetailPageScraper {
   ): Promise<void> {
     try {
       console.log(
-        `Processing ${posts.length} posts for thread ${threadId} (batch per post)`
+        `Processing ${posts.length} posts for thread ${threadId} (batch size: 30)`
       );
 
-      let processedCount = 0;
+      const BATCH_SIZE = 30;
+      let totalProcessed = 0;
 
-      // Process each post individually
-      for (const postData of posts) {
-        processedCount++;
+      // Process posts in batches of 30
+      for (let i = 0; i < posts.length; i += BATCH_SIZE) {
+        const batch = posts.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(posts.length / BATCH_SIZE);
+
         console.log(
-          `[${processedCount}/${posts.length}] Processing post ${postData.postId}`
+          `Processing batch ${batchNum}/${totalBatches} (${batch.length} posts)`
         );
 
-        try {
-          // Step 1: Delete existing media if post has new media to upload
-          if (postData.medias && postData.medias.length > 0) {
-            try {
-              await deleteS3ImagesByThreadAndPost(threadId, postData.postId);
-              console.log(
-                `✓ Deleted S3 images for post ${postData.postId}`
-              );
-            } catch (error) {
-              console.error(
-                `Failed to delete S3 images for post ${postData.postId}:`,
-                error
-              );
-            }
+        // Process media for this batch in parallel
+        const postMediaMap = await this.processBatchMedia(batch, threadId);
 
-            try {
-              await ForumMedia.destroy({
-                where: {
-                  postId: postData.postId,
-                  threadId: threadId,
-                  type: "img",
-                },
-              });
-              console.log(
-                `✓ Deleted media records for post ${postData.postId}`
-              );
-            } catch (error) {
-              console.error(
-                `Failed to delete media records for post ${postData.postId}:`,
-                error
-              );
-            }
-          }
+        // Save posts and media to database
+        const dbPromises: Promise<any>[] = [];
 
-          // Step 2: Process and upload media for this post
-          const processedMedias = await this.processSinglePostMedia(
-            postData,
-            threadId
+        // Save/update posts (without medias field)
+        batch.forEach((postData) => {
+          dbPromises.push(
+            ForumPost.upsert({
+              postId: postData.postId,
+              threadId: threadId,
+              author: postData.author,
+              content: postData.content,
+              postCreatedDate: postData.postCreatedDate,
+              likes: postData.likes,
+            })
           );
+        });
 
-          // Step 3: Save post data to database
-          await ForumPost.upsert({
-            postId: postData.postId,
-            threadId: threadId,
-            author: postData.author,
-            content: postData.content,
-            postCreatedDate: postData.postCreatedDate,
-            likes: postData.likes,
-          });
+        // Save media data to ForumMedia table
+        for (const postData of batch) {
+          const processedMedias = postMediaMap.get(postData.postId) || [];
 
-          // Step 4: Save media records to database
           for (const mediaData of processedMedias) {
             const { s3Url, hasThumbnail } = mediaData;
 
@@ -1520,30 +1278,33 @@ class ForumDetailPageScraper {
                 : null;
 
               if (mediaType && !s3Url.includes("_thumb")) {
-                await ForumMedia.create({
-                  threadId: threadId,
-                  postId: postData.postId,
-                  link: s3Url,
-                  type: mediaType,
-                  existThumb: hasThumbnail ? 1 : 0,
-                });
+                dbPromises.push(
+                  ForumMedia.create({
+                    threadId: threadId,
+                    postId: postData.postId,
+                    link: s3Url,
+                    type: mediaType,
+                    existThumb: hasThumbnail ? 1 : 0,
+                  })
+                );
               }
             }
           }
-
-          console.log(
-            `✓ Completed post ${postData.postId} (${processedMedias.length} media files)`
-          );
-        } catch (error) {
-          console.error(
-            `✗ Error processing post ${postData.postId}:`,
-            error
-          );
         }
+
+        await Promise.allSettled(dbPromises);
+
+        totalProcessed += batch.length;
+        console.log(
+          `✓ Completed batch ${batchNum}/${totalBatches} - Total processed: ${totalProcessed}/${posts.length}`
+        );
+
+        // Clear memory after each batch to prevent memory accumulation
+        await this.clearPageMemoryCache();
       }
 
       console.log(
-        `✓ Completed processing ${processedCount} posts for thread ${threadId}`
+        `✓ Completed processing all ${totalProcessed} posts for thread ${threadId}`
       );
     } catch (error) {
       console.error("Error saving posts to database:", error);
