@@ -1236,10 +1236,10 @@ class ForumDetailPageScraper {
   ): Promise<void> {
     try {
       console.log(
-        `Processing ${posts.length} posts for thread ${threadId} (batch size: 30)`
+        `Processing ${posts.length} posts for thread ${threadId}`
       );
 
-      const BATCH_SIZE = 10;
+      const BATCH_SIZE = 5;
       let totalProcessed = 0;
 
       await ForumMedia.destroy({
@@ -1252,7 +1252,7 @@ class ForumDetailPageScraper {
         },
       });
 
-      // Process posts in batches of 30
+      // Process posts in batches
       for (let i = 0; i < posts.length; i += BATCH_SIZE) {
         const batch = posts.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
