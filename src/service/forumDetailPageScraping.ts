@@ -767,8 +767,8 @@ class ForumDetailPageScraper {
             console.log(
               `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
             );
-            console.log(`Existing Post IDs: ${existingPostIds}`);
-            console.log(`New Posts: ${newPosts}`);
+            console.log(`Existing Post IDs: ${Array.from(existingPostIds)}`);
+            console.log(`New Posts: ${newPosts.map((post) => post.postId)}`);
 
             // If ALL posts already exist, stop scraping (we've reached old content)
             if (newPosts.length === 0 && postIds.length !== 0) {
