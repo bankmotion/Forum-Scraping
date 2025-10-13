@@ -26,7 +26,7 @@ export interface PostData {
   author: string;
   content: string;
   postCreatedDate: string;
-  likes: number;
+  likes: string;
   medias: [string, string][]; // [fullImageUrl, thumbImageUrl] pairs
 }
 
@@ -689,8 +689,12 @@ class ForumDetailPageScraper {
       const totalPages = await this.getTotalPages(fullUrl);
       console.log(`Thread has ${totalPages} pages`);
 
-      // Scrape all pages and save after each page
-      for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      // Scrape pages in REVERSE order (last to first)
+      // Since posts are sorted by creation date ASC, newest posts are on the last page
+      // We can stop when we encounter posts that already exist in the database
+      let shouldContinueScraping = true;
+
+      for (let pageNum = totalPages; pageNum >= 1 && shouldContinueScraping; pageNum--) {
         console.log(
           `Node ${this.NODE_INDEX}/${
             this.NODE_COUNT - 1
@@ -715,15 +719,47 @@ class ForumDetailPageScraper {
             ),
           ]);
 
-          // Handle cookie consent on first page only
-          if (pageNum === 1) {
+          // Handle cookie consent on first page loaded
+          if (pageNum === totalPages) {
             await this.handleCookieConsent();
           }
 
           const posts = await this.scrapePagePosts();
 
-          // Save posts to database with batch processing
-          await this.savePostsToDatabase(thread.threadId, posts);
+          // Check which posts already exist in database
+          const postIds = posts.map((post) => post.postId);
+          const existingPosts = await ForumPost.findAll({
+            where: {
+              threadId: thread.threadId,
+              postId: { [Op.in]: postIds },
+            },
+            attributes: ["postId"],
+          });
+
+          const existingPostIds = new Set(
+            existingPosts.map((post) => post.postId)
+          );
+
+          // Filter out posts that already exist
+          const newPosts = posts.filter(
+            (post) => !existingPostIds.has(post.postId)
+          );
+
+          console.log(
+            `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
+          );
+
+          // If ALL posts already exist, stop scraping (we've reached old content)
+          if (newPosts.length === 0) {
+            console.log(
+              `All posts on page ${pageNum} already exist. Stopping scraping for this thread.`
+            );
+            shouldContinueScraping = false;
+            break;
+          }
+
+          // Save only new posts to database with batch processing
+          await this.savePostsToDatabase(thread.threadId, newPosts);
 
           // Clear memory cache after each page is processed
           await this.clearPageMemoryCache();
@@ -866,25 +902,19 @@ class ForumDetailPageScraper {
               }
             }
 
-            // Extract likes count
-            let likes = 0;
+            // Extract likes as string (can be "3K", "100", etc.)
+            let likes = "0";
             const reactionsLink = element.querySelector(
               '.reactionsBar-link[href*="/reactions"]'
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
-
-              // Check for "and X other person/people" pattern
-              const otherMatch = text.match(/and\s+(\d+)\s+other/);
-
-              if (otherMatch) {
-                // Count named people (split by comma) + "and X others"
-                const namedPeople = text.split(",").length;
-                const otherCount = parseInt(otherMatch[1]);
-                likes = namedPeople + otherCount;
-              } else {
-                // No "and X others", just count comma-separated names
-                likes = text.split(",").length;
+              
+              // Extract the number/count from the text
+              // Format can be "3K people", "100 people", etc.
+              const match = text.match(/([0-9.]+[KMB]?)/i);
+              if (match) {
+                likes = match[1];
               }
             }
 
@@ -958,19 +988,19 @@ class ForumDetailPageScraper {
             });
 
             // Get videos from message content
-            // const videoElements = element.querySelectorAll(
-            //   ".message-content video source, .message-content video[src]"
-            // );
-            // videoElements.forEach((video: any) => {
-            //   const src = video.getAttribute("src");
-            //   if (src) {
-            //     const fullUrl = src.startsWith("http")
-            //       ? src
-            //       : `https://www.lpsg.com${src}`;
-            //     // Add video with empty thumb
-            //     medias.push([fullUrl, ""]);
-            //   }
-            // });
+            const videoElements = element.querySelectorAll(
+              ".message-content video source, .message-content video[src]"
+            );
+            videoElements.forEach((video: any) => {
+              const src = video.getAttribute("src");
+              if (src) {
+                const fullUrl = src.startsWith("http")
+                  ? src
+                  : `https://www.lpsg.com${src}`;
+                // Add video with empty thumb
+                medias.push([fullUrl, ""]);
+              }
+            });
 
             // Remove duplicates from media pairs
             // Keep only unique pairs based on full image URL
@@ -1245,7 +1275,6 @@ class ForumDetailPageScraper {
       await ForumMedia.destroy({
         where: {
           threadId: threadId,
-          type: "img",
           postId: {
             [Op.in]: posts.map((post) => post.postId),
           },

@@ -4,6 +4,7 @@ import { ForumScraper } from "./src/service/forumScrapingScript";
 import { ForumDetailPageScraper } from "./src/service/forumDetailPageScraping";
 import { ForumMediaMigration } from "./src/service/forumMediaMigration";
 import { S3FileList } from "./src/service/s3FileList";
+import { ForumThreadLatestUpdateChecker } from "./src/service/forumThreadLatestUpdate";
 
 async function main() {
   try {
@@ -19,6 +20,10 @@ async function main() {
     // console.log('Starting forum scraping...');
     // const scraper = new ForumScraper();
     // await scraper.run();
+
+    // console.log('Starting forum thread latest update...');
+    const forumThreadLatestUpdate = new ForumThreadLatestUpdateChecker();
+    await forumThreadLatestUpdate.run();
 
     // console.log('Starting detail page scraping...');
     const detailPageScraper = new ForumDetailPageScraper();
