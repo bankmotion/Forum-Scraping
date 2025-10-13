@@ -687,7 +687,6 @@ class ForumDetailPageScraper {
 
       // Get total pages for this thread
       const totalPages = await this.getTotalPages(fullUrl);
-      console.log(`Thread has ${totalPages} pages`);
 
       // Scrape pages in REVERSE order (last to first)
       // Since posts are sorted by creation date ASC, newest posts are on the last page
@@ -767,14 +766,9 @@ class ForumDetailPageScraper {
             console.log(
               `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
             );
-            console.log(`Existing Post IDs: ${Array.from(existingPostIds)}`);
-            console.log(`New Posts: ${newPosts.map((post) => post.postId)}`);
 
             // If ALL posts already exist, stop scraping (we've reached old content)
             if (newPosts.length === 0 && postIds.length !== 0) {
-              console.log(
-                `All posts on page ${pageNum} already exist. Stopping scraping for this thread.`
-              );
               shouldContinueScraping = false;
               break;
             }
@@ -1278,8 +1272,6 @@ class ForumDetailPageScraper {
         }
       }
     }
-
-    console.log(`✓ Completed processing media files for batch`);
     return postMediaMap;
   }
 
@@ -1292,8 +1284,6 @@ class ForumDetailPageScraper {
     posts: PostData[]
   ): Promise<void> {
     try {
-      console.log(`Processing ${posts.length} posts for thread ${threadId}`);
-
       const BATCH_SIZE = 2;
       let totalProcessed = 0;
 
@@ -1311,10 +1301,6 @@ class ForumDetailPageScraper {
         const batch = posts.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
         const totalBatches = Math.ceil(posts.length / BATCH_SIZE);
-
-        console.log(
-          `Processing batch ${batchNum}/${totalBatches} (${batch.length} posts)`
-        );
 
         // Process media for this batch in parallel
         const postMediaMap = await this.processBatchMedia(batch, threadId);
@@ -1368,9 +1354,6 @@ class ForumDetailPageScraper {
         await Promise.allSettled(dbPromises);
 
         totalProcessed += batch.length;
-        console.log(
-          `✓ Completed batch ${batchNum}/${totalBatches} - Total processed: ${totalProcessed}/${posts.length}`
-        );
 
         // Clear memory after each batch to prevent memory accumulation
         await this.clearPageMemoryCache();
