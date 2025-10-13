@@ -694,7 +694,11 @@ class ForumDetailPageScraper {
       // We can stop when we encounter posts that already exist in the database
       let shouldContinueScraping = true;
 
-      for (let pageNum = totalPages; pageNum >= 1 && shouldContinueScraping; pageNum--) {
+      for (
+        let pageNum = totalPages;
+        pageNum >= 1 && shouldContinueScraping;
+        pageNum--
+      ) {
         console.log(
           `Node ${this.NODE_INDEX}/${
             this.NODE_COUNT - 1
@@ -705,88 +709,111 @@ class ForumDetailPageScraper {
         const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
         console.log(`Page URL: ${pageUrl}`);
 
-        try {
-          // Add 30-second timeout for page loading
-          await Promise.race([
-            this.page!.goto(pageUrl, {
-              waitUntil: "networkidle2",
-            }),
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error("Page load timeout after 30 seconds")),
-                30000
-              )
-            ),
-          ]);
+        // Retry logic: try loading the page up to 3 times
+        let pageLoadSuccess = false;
+        const MAX_RETRIES = 3;
 
-          // Handle cookie consent on first page loaded
-          if (pageNum === totalPages) {
-            await this.handleCookieConsent();
-          }
+        for (
+          let attempt = 1;
+          attempt <= MAX_RETRIES && !pageLoadSuccess;
+          attempt++
+        ) {
+          try {
+            if (attempt > 1) {
+              console.log(
+                `Retry attempt ${attempt}/${MAX_RETRIES} for page ${pageNum}`
+              );
+            }
 
-          const posts = await this.scrapePagePosts();
+            // Add 30-second timeout for page loading
+            await Promise.race([
+              this.page!.goto(pageUrl, {
+                waitUntil: "networkidle2",
+              }),
+              new Promise((_, reject) =>
+                setTimeout(
+                  () => reject(new Error("Page load timeout after 30 seconds")),
+                  30000
+                )
+              ),
+            ]);
 
-          // Check which posts already exist in database
-          const postIds = posts.map((post) => post.postId);
-          const existingPosts = await ForumPost.findAll({
-            where: {
-              threadId: thread.threadId,
-              postId: { [Op.in]: postIds },
-            },
-            attributes: ["postId"],
-          });
+            // Handle cookie consent on first page loaded
+            if (pageNum === totalPages && attempt === 1) {
+              await this.handleCookieConsent();
+            }
 
-          const existingPostIds = new Set(
-            existingPosts.map((post) => post.postId)
-          );
+            const posts = await this.scrapePagePosts();
 
-          // Filter out posts that already exist
-          const newPosts = posts.filter(
-            (post) => !existingPostIds.has(post.postId)
-          );
+            // Check which posts already exist in database
+            const postIds = posts.map((post) => post.postId);
+            const existingPosts = await ForumPost.findAll({
+              where: {
+                threadId: thread.threadId,
+                postId: { [Op.in]: postIds },
+              },
+              attributes: ["postId"],
+            });
 
-          console.log(
-            `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
-          );
-
-          // If ALL posts already exist, stop scraping (we've reached old content)
-          if (newPosts.length === 0) {
-            console.log(
-              `All posts on page ${pageNum} already exist. Stopping scraping for this thread.`
+            const existingPostIds = new Set(
+              existingPosts.map((post) => post.postId)
             );
-            shouldContinueScraping = false;
-            break;
+
+            // Filter out posts that already exist
+            const newPosts = posts.filter(
+              (post) => !existingPostIds.has(post.postId)
+            );
+
+            console.log(
+              `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
+            );
+            console.log(`Existing Post IDs: ${existingPostIds}`);
+            console.log(`New Posts: ${newPosts}`);
+
+            // If ALL posts already exist, stop scraping (we've reached old content)
+            if (newPosts.length === 0 && postIds.length !== 0) {
+              console.log(
+                `All posts on page ${pageNum} already exist. Stopping scraping for this thread.`
+              );
+              shouldContinueScraping = false;
+              break;
+            }
+
+            // Save only new posts to database with batch processing
+            await this.savePostsToDatabase(thread.threadId, newPosts);
+
+            // Clear memory cache after each page is processed
+            await this.clearPageMemoryCache();
+
+            // Increment pages scraped counter
+            this.pagesScraped++;
+
+            // Check if we need to restart browser
+            if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
+              await this.restartBrowser();
+            }
+
+            // Mark page load as successful
+            pageLoadSuccess = true;
+          } catch (error) {
+            console.error(
+              `Error on page ${pageNum}, attempt ${attempt}/${MAX_RETRIES}: ${error}`
+            );
+
+            // If this is not the last attempt, restart browser and retry
+            if (attempt < MAX_RETRIES) {
+              console.log(`Restarting browser before retry...`);
+              await this.restartBrowser();
+              await this.delay(2000); // Wait 2 seconds before retry
+            } else {
+              // Last attempt failed, restart browser and skip this page
+              console.error(
+                `Failed to load page ${pageNum} after ${MAX_RETRIES} attempts. Skipping page.`
+              );
+              await this.restartBrowser();
+              this.pagesScraped++;
+            }
           }
-
-          // Save only new posts to database with batch processing
-          await this.savePostsToDatabase(thread.threadId, newPosts);
-
-          // Clear memory cache after each page is processed
-          await this.clearPageMemoryCache();
-
-          // Increment pages scraped counter
-          this.pagesScraped++;
-
-          // Check if we need to restart browser
-          if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-            // console.log(
-            //   `Reached ${this.PAGES_BEFORE_RESTART} pages scraped. Restarting browser...`
-            // );
-            await this.restartBrowser();
-          }
-        } catch (error) {
-          // console.error(
-          //   `❌ Page ${pageNum} failed to load within 30 seconds: ${pageUrl}`
-          // );
-          console.error(`Error: ${error}`);
-
-          // Skip this page and continue to next page
-          // console.log(
-          //   `⏭️    page ${pageNum} failed to load. Restarting browser...`
-          // );
-          await this.restartBrowser();
-
-          this.pagesScraped++;
         }
       }
 
@@ -909,7 +936,7 @@ class ForumDetailPageScraper {
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
-              
+
               // Extract the number/count from the text
               // Format can be "3K people", "100 people", etc.
               const match = text.match(/([0-9.]+[KMB]?)/i);
@@ -1265,9 +1292,7 @@ class ForumDetailPageScraper {
     posts: PostData[]
   ): Promise<void> {
     try {
-      console.log(
-        `Processing ${posts.length} posts for thread ${threadId}`
-      );
+      console.log(`Processing ${posts.length} posts for thread ${threadId}`);
 
       const BATCH_SIZE = 5;
       let totalProcessed = 0;
