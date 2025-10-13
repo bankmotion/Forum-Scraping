@@ -1294,7 +1294,7 @@ class ForumDetailPageScraper {
     try {
       console.log(`Processing ${posts.length} posts for thread ${threadId}`);
 
-      const BATCH_SIZE = 5;
+      const BATCH_SIZE = 2;
       let totalProcessed = 0;
 
       await ForumMedia.destroy({
