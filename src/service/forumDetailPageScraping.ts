@@ -1304,7 +1304,7 @@ class ForumDetailPageScraper {
     posts: PostData[]
   ): Promise<void> {
     try {
-      const BATCH_SIZE = 2;
+      const BATCH_SIZE = 5;
       let totalProcessed = 0;
 
       await ForumMedia.destroy({
