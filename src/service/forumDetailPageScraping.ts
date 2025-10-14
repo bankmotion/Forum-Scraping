@@ -933,14 +933,16 @@ class ForumDetailPageScraper {
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
-              
+
               // Check for "and X others" pattern (X can be like "8", "5K", "1.5M", etc.)
-              const othersMatch = text.match(/and\s+([0-9.]+)([KMB]?)\s+others?/i);
-              
+              const othersMatch = text.match(
+                /and\s+([0-9.]+)([KMB]?)\s+others?/i
+              );
+
               if (othersMatch) {
                 const otherCount = othersMatch[1];
                 const suffix = othersMatch[2];
-                
+
                 if (suffix) {
                   // If there's a K/M/B suffix, use that value as-is (it's approximate total)
                   likes = otherCount + suffix;
@@ -1072,7 +1074,7 @@ class ForumDetailPageScraper {
           }
         });
 
-        return posts;
+        return posts.filter((post) => post.medias.length > 0);
       });
 
       console.log(`Scraped ${posts.length} posts`);
