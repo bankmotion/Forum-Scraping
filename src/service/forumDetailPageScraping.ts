@@ -923,19 +923,37 @@ class ForumDetailPageScraper {
               }
             }
 
-            // Extract likes as string (can be "3K", "100", etc.)
+            // Extract likes count
+            // Format: "cutthefx, XanRodck25, Synth1984 and 8 others"
+            // Or: "cutthefx and 5K others" (can have K, M, B suffixes)
+            // Or: "cutthefx" (just one person)
             let likes = "0";
             const reactionsLink = element.querySelector(
               '.reactionsBar-link[href*="/reactions"]'
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
-
-              // Extract the number/count from the text
-              // Format can be "3K people", "100 people", etc.
-              const match = text.match(/([0-9.]+[KMB]?)/i);
-              if (match) {
-                likes = match[1];
+              
+              // Check for "and X others" pattern (X can be like "8", "5K", "1.5M", etc.)
+              const othersMatch = text.match(/and\s+([0-9.]+)([KMB]?)\s+others?/i);
+              
+              if (othersMatch) {
+                const otherCount = othersMatch[1];
+                const suffix = othersMatch[2];
+                
+                if (suffix) {
+                  // If there's a K/M/B suffix, use that value as-is (it's approximate total)
+                  likes = otherCount + suffix;
+                } else {
+                  // If plain number, add visible names count
+                  const nameElements = reactionsLink.querySelectorAll("bdi");
+                  const totalLikes = nameElements.length + parseInt(otherCount);
+                  likes = totalLikes.toString();
+                }
+              } else {
+                // No "others" text, just count visible names (bdi tags)
+                const nameElements = reactionsLink.querySelectorAll("bdi");
+                likes = nameElements.length.toString();
               }
             }
 
