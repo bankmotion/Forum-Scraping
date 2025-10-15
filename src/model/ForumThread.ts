@@ -33,6 +33,9 @@ export class ForumThread extends Model {
   @Column(DataType.STRING)
   threadUrl!: string;
 
+  @Column(DataType.INTEGER)
+  lastUpdatedPage!: number;
+
   @Column({
     type: DataType.STRING,
     allowNull: true,

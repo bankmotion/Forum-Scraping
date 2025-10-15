@@ -22,15 +22,15 @@ async function main() {
     // await scraper.run();
 
     // console.log('Starting forum thread latest update...');
-    const forumThreadLatestUpdate = new ForumThreadLatestUpdateChecker();
-    await forumThreadLatestUpdate.run();
+    // const forumThreadLatestUpdate = new ForumThreadLatestUpdateChecker();
+    // await forumThreadLatestUpdate.run();
 
-    // console.log('Starting detail page scraping...');
+    // // console.log('Starting detail page scraping...');
     const detailPageScraper = new ForumDetailPageScraper();
     await detailPageScraper.run();
 
     // const threadId = 10003071;
-    // const threadId = 10003071;
+    // const threadId = 7400871;
     // const detailPageScraper = new ForumDetailPageScraper();
     // const detailPage = await detailPageScraper.runDetailPage(threadId);
     // console.log(detailPage);

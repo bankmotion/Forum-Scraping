@@ -145,6 +145,47 @@ class ForumDetailPageScraper {
   }
 
   /**
+   * Helper method to filter out tracking pixels and unwanted URLs
+   */
+  private shouldSkipUrl(url: string): boolean {
+    // Filter out 1x1 transparent pixel GIF (common tracking pixel)
+    if (
+      url.includes(
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+      )
+    ) {
+      return true;
+    }
+
+    // Filter out other common tracking pixel patterns
+    if (
+      url.includes("data:image/gif;base64,") &&
+      url.includes("R0lGODlhAQABAIAAAAAAAP")
+    ) {
+      return true;
+    }
+
+    // Filter out invalid URLs
+    if (url === "#" || url === "javascript:void(0)") {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Filter out unwanted URLs from post media arrays
+   */
+  private filterPostMedias(posts: PostData[]): PostData[] {
+    return posts.map((post) => ({
+      ...post,
+      medias: post.medias.filter(([fullUrl, thumbUrl]) => {
+        return !this.shouldSkipUrl(fullUrl) && !this.shouldSkipUrl(thumbUrl);
+      }),
+    }));
+  }
+
+  /**
    * Helper method to determine if a URL is NOT a raw image file
    * (i.e., it's an attachment page that needs to be processed)
    */
@@ -153,7 +194,13 @@ class ForumDetailPageScraper {
 
     // Check if it has image name but no extension (like screenshot-2024-01-25-013402-png.120147661)
     const imageNames = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"];
-    const hasImageName = imageNames.some((name) => lowerUrl.includes(name));
+    const hasImageName = imageNames.some(
+      (name) =>
+        lowerUrl.includes(`-${name}`) ||
+        lowerUrl.includes(`_${name}`) ||
+        lowerUrl.includes(`${name}-`) ||
+        lowerUrl.includes(name)
+    );
 
     // Check if it's a direct image file with extension
     const imageExtensions = [
@@ -169,8 +216,34 @@ class ForumDetailPageScraper {
       lowerUrl.includes(ext)
     );
 
-    // Return true if it has image name but no extension (attachment page)
-    return hasImageName && !hasImageExtension;
+    // Check for video extensions as well
+    const videoExtensions = [
+      ".mp4",
+      ".avi",
+      ".mov",
+      ".wmv",
+      ".flv",
+      ".webm",
+      ".mkv",
+    ];
+    const hasVideoExtension = videoExtensions.some((ext) =>
+      lowerUrl.includes(ext)
+    );
+
+    // Check for video names without extension
+    const videoNames = ["mp4", "avi", "mov", "wmv", "flv", "webm", "mkv"];
+    const hasVideoName = videoNames.some(
+      (name) =>
+        lowerUrl.includes(`-${name}`) ||
+        lowerUrl.includes(`_${name}`) ||
+        lowerUrl.includes(`${name}-`) ||
+        lowerUrl.includes(name)
+    );
+
+    // Return true if it has image/video name but no extension (attachment page)
+    return (
+      (hasImageName || hasVideoName) && !hasImageExtension && !hasVideoExtension
+    );
   }
 
   /**
@@ -181,73 +254,105 @@ class ForumDetailPageScraper {
   private async downloadFromAttachmentPage(
     attachmentUrl: string
   ): Promise<{ buffer: Buffer; extension: string } | null> {
-    let attachmentPage: Page | null = null;
+    const MAX_RETRIES = 3;
+    let lastError: Error | null = null;
 
-    try {
-      // console.log(`Downloading from attachment page: ${attachmentUrl}`);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      let attachmentPage: Page | null = null;
 
-      if (!this.browser) {
-        throw new Error("Browser not initialized");
-      }
+      try {
+        if (attempt > 1) {
+          console.log(
+            `Retry attempt ${attempt}/${MAX_RETRIES} for attachment: ${attachmentUrl}`
+          );
+          // Add delay between retries
+          await this.delay(1000 * attempt); // Progressive delay: 1s, 2s, 3s
+        }
 
-      // Extract file extension from the attachment URL
-      const fileExtension =
-        this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
+        // console.log(`Downloading from attachment page: ${attachmentUrl}`);
 
-      // Create a new page for this attachment
-      attachmentPage = await this.browser.newPage();
+        if (!this.browser) {
+          throw new Error("Browser not initialized");
+        }
 
-      // Set user agent for the new page
-      await attachmentPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
+        // Extract file extension from the attachment URL
+        const fileExtension =
+          this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
 
-      // Copy cookies from the main page to ensure authentication
-      if (this.page) {
-        const cookies = await this.page.cookies();
-        await attachmentPage.setCookie(...cookies);
-        // console.log(`Copied ${cookies.length} cookies to attachment page`);
-      }
+        // Create a new page for this attachment
+        attachmentPage = await this.browser.newPage();
 
-      // Navigate to the attachment page
-      await attachmentPage.goto(attachmentUrl, {
-        waitUntil: "networkidle2",
-        timeout: 30000,
-      });
+        // Set user agent for the new page
+        await attachmentPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        );
 
-      // Wait a bit for the page to fully load
-      await this.delay(500);
+        // Copy cookies from the main page to ensure authentication
+        if (this.page) {
+          const cookies = await this.page.cookies();
+          await attachmentPage.setCookie(...cookies);
+          // console.log(`Copied ${cookies.length} cookies to attachment page`);
+        }
 
-      // Wait for the image to be fully loaded on the page
-      await attachmentPage.waitForSelector("img", { timeout: 10000 });
+        // Navigate to the attachment page
+        await attachmentPage.goto(attachmentUrl, {
+          waitUntil: "networkidle2",
+          timeout: 30000,
+        });
 
-      // Download the image using the page's context to maintain authentication
-      // Navigate to the image URL directly to get the image data
-      const response = await attachmentPage.goto(attachmentUrl, {
-        waitUntil: "networkidle2",
-        timeout: 30000,
-      });
+        // Wait a bit for the page to fully load
+        await this.delay(500);
 
-      if (!response || !response.ok()) {
-        throw new Error(`Failed to load image: ${response?.status()}`);
-      }
+        // Wait for the image to be fully loaded on the page
+        await attachmentPage.waitForSelector("img", { timeout: 10000 });
 
-      // Get the response body as buffer
-      const imageBuffer = await response.buffer();
-      return { buffer: imageBuffer, extension: fileExtension };
-    } catch (error) {
-      // console.error(`Error downloading from attachment page ${attachmentUrl}:`);
-      return null;
-    } finally {
-      // Always close the attachment page to prevent memory leaks
-      if (attachmentPage) {
-        try {
+        // Download the image using the page's context to maintain authentication
+        // Navigate to the image URL directly to get the image data
+        const response = await attachmentPage.goto(attachmentUrl, {
+          waitUntil: "networkidle2",
+          timeout: 30000,
+        });
+
+        if (!response || !response.ok()) {
+          throw new Error(`Failed to load image: ${response?.status()}`);
+        }
+
+        // Get the response body as buffer
+        const imageBuffer = await response.buffer();
+
+        // Close the attachment page before returning success
+        if (attachmentPage) {
           await attachmentPage.close();
-        } catch (closeError) {
-          console.error("Error closing attachment page:", closeError);
+        }
+
+        return { buffer: imageBuffer, extension: fileExtension };
+      } catch (error) {
+        lastError = error as Error;
+        console.error(
+          `❌ Error downloading from attachment page ${attachmentUrl} (attempt ${attempt}/${MAX_RETRIES}):`
+        );
+
+        // Close the attachment page on error
+        if (attachmentPage) {
+          try {
+            await attachmentPage.close();
+          } catch (closeError) {
+            console.error("Error closing attachment page:", closeError);
+          }
+        }
+
+        // If this is the last attempt, don't continue
+        if (attempt === MAX_RETRIES) {
+          break;
         }
       }
     }
+
+    // All retries failed
+    console.error(
+      `Failed to download attachment after ${MAX_RETRIES} attempts: ${attachmentUrl}`
+    );
+    return null;
   }
 
   /**
@@ -258,7 +363,7 @@ class ForumDetailPageScraper {
   public extractFileExtensionFromAttachmentUrl(attachmentUrl: string): string {
     const lowerUrl = attachmentUrl.toLowerCase();
 
-    // Check for common image extensions in the URL
+    // Check for common image extensions in the URL (with dot)
     const imageExtensions = [
       ".png",
       ".jpg",
@@ -275,10 +380,65 @@ class ForumDetailPageScraper {
       }
     }
 
-    // Default to .jpg if no extension found
-    // console.warn(
-    //   `No file extension found in URL: ${attachmentUrl}, defaulting to .jpg`
-    // );
+    // Check for extensions without dot (like "-gif", "-png", etc.)
+    const extensionsWithoutDot = [
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "bmp",
+      "webp",
+      "svg",
+    ];
+
+    for (const ext of extensionsWithoutDot) {
+      // Look for patterns like "-gif", "_gif", or "gif-" in the URL
+      if (
+        lowerUrl.includes(`-${ext}`) ||
+        lowerUrl.includes(`_${ext}`) ||
+        lowerUrl.includes(`${ext}-`)
+      ) {
+        return `.${ext}`;
+      }
+    }
+
+    // Check for video extensions as well
+    const videoExtensions = [
+      ".mp4",
+      ".avi",
+      ".mov",
+      ".wmv",
+      ".flv",
+      ".webm",
+      ".mkv",
+    ];
+
+    for (const ext of videoExtensions) {
+      if (lowerUrl.includes(ext)) {
+        return ext;
+      }
+    }
+
+    // Check for video extensions without dot
+    const videoExtensionsWithoutDot = [
+      "mp4",
+      "avi",
+      "mov",
+      "wmv",
+      "flv",
+      "webm",
+      "mkv",
+    ];
+
+    for (const ext of videoExtensionsWithoutDot) {
+      if (
+        lowerUrl.includes(`-${ext}`) ||
+        lowerUrl.includes(`_${ext}`) ||
+        lowerUrl.includes(`${ext}-`)
+      ) {
+        return `.${ext}`;
+      }
+    }
     return ".jpg";
   }
 
@@ -688,20 +848,20 @@ class ForumDetailPageScraper {
       // Get total pages for this thread
       const totalPages = await this.getTotalPages(fullUrl);
 
-      // Scrape pages in REVERSE order (last to first)
-      // Since posts are sorted by creation date ASC, newest posts are on the last page
-      // We can stop when we encounter posts that already exist in the database
+      // Scrape pages in ASCENDING order (first to last)
+      // Start from lastUpdatedPage + 1, or page 1 if lastUpdatedPage is null
+      const startPage = thread.lastUpdatedPage ? thread.lastUpdatedPage : 1;
       let shouldContinueScraping = true;
 
       for (
-        let pageNum = totalPages;
-        pageNum >= 1 && shouldContinueScraping;
-        pageNum--
+        let pageNum = startPage;
+        pageNum <= totalPages && shouldContinueScraping;
+        pageNum++
       ) {
         console.log(
           `Node ${this.NODE_INDEX}/${
             this.NODE_COUNT - 1
-          }: Scraping page ${pageNum} of ${totalPages}...`
+          }: Scraping page ${pageNum} of ${totalPages} (starting from page ${startPage})...`
         );
 
         // Handle URL structure: /threads/title.id/page-X or just /threads/title.id/ for page 1
@@ -738,7 +898,7 @@ class ForumDetailPageScraper {
             ]);
 
             // Handle cookie consent on first page loaded
-            if (pageNum === totalPages && attempt === 1) {
+            if (pageNum === startPage && attempt === 1) {
               await this.handleCookieConsent();
             }
 
@@ -776,6 +936,12 @@ class ForumDetailPageScraper {
             // Save only new posts to database with batch processing
             await this.savePostsToDatabase(thread.threadId, newPosts);
 
+            // Update lastUpdatedPage after successful page scraping
+            await ForumThread.update(
+              { lastUpdatedPage: pageNum },
+              { where: { threadId: thread.threadId } }
+            );
+
             // Clear memory cache after each page is processed
             await this.clearPageMemoryCache();
 
@@ -800,12 +966,13 @@ class ForumDetailPageScraper {
               await this.restartBrowser();
               await this.delay(2000); // Wait 2 seconds before retry
             } else {
-              // Last attempt failed, restart browser and skip this page
+              // Last attempt failed, restart browser and skip entire thread
               console.error(
-                `Failed to load page ${pageNum} after ${MAX_RETRIES} attempts. Skipping page.`
+                `Failed to load page ${pageNum} after ${MAX_RETRIES} attempts. Skipping entire thread ${thread.threadId}.`
               );
               await this.restartBrowser();
               this.pagesScraped++;
+              return; // Exit the entire thread scraping
             }
           }
         }
@@ -988,6 +1155,7 @@ class ForumDetailPageScraper {
                       const thumbUrl = imgSrc.startsWith("http")
                         ? imgSrc
                         : `https://www.lpsg.com${imgSrc}`;
+
                       // Add pair: [fullUrl, thumbUrl]
                       medias.push([fullUrl, thumbUrl]);
                     }
@@ -1029,19 +1197,19 @@ class ForumDetailPageScraper {
             });
 
             // Get videos from message content
-            const videoElements = element.querySelectorAll(
-              ".message-content video source, .message-content video[src]"
-            );
-            videoElements.forEach((video: any) => {
-              const src = video.getAttribute("src");
-              if (src) {
-                const fullUrl = src.startsWith("http")
-                  ? src
-                  : `https://www.lpsg.com${src}`;
-                // Add video with empty thumb
-                medias.push([fullUrl, ""]);
-              }
-            });
+            // const videoElements = element.querySelectorAll(
+            //   ".message-content video source, .message-content video[src]"
+            // );
+            // videoElements.forEach((video: any) => {
+            //   const src = video.getAttribute("src");
+            //   if (src) {
+            //     const fullUrl = src.startsWith("http")
+            //       ? src
+            //       : `https://www.lpsg.com${src}`;
+            //     // Add video with empty thumb
+            //     medias.push([fullUrl, ""]);
+            //   }
+            // });
 
             // Remove duplicates from media pairs
             // Keep only unique pairs based on full image URL
@@ -1074,12 +1242,13 @@ class ForumDetailPageScraper {
           }
         });
 
-        return posts.filter((post) => post.medias.length > 0);
+        return posts;
       });
 
-      console.log(`Scraped ${posts.length} posts`);
+      // Filter out tracking pixels and unwanted URLs from the scraped posts
+      const filteredPosts = this.filterPostMedias(posts);
 
-      return posts;
+      return filteredPosts;
     } catch (error) {
       console.error("Error scraping page posts:", error);
       return [];
@@ -1114,6 +1283,11 @@ class ForumDetailPageScraper {
 
       for (const [fullUrl, thumbUrl] of post.medias) {
         if (fullUrl || thumbUrl) {
+          // Skip if either URL is a tracking pixel or unwanted
+          if (this.shouldSkipUrl(fullUrl) || this.shouldSkipUrl(thumbUrl)) {
+            continue;
+          }
+
           const baseUrl = fullUrl || thumbUrl;
           let fullKey: string;
           let thumbKey: string;
@@ -1313,6 +1487,7 @@ class ForumDetailPageScraper {
           postId: {
             [Op.in]: posts.map((post) => post.postId),
           },
+          type: "img",
         },
       });
 
@@ -1372,6 +1547,29 @@ class ForumDetailPageScraper {
         }
 
         await Promise.allSettled(dbPromises);
+
+        // Log media count for each post in this batch
+        for (const postData of batch) {
+          const processedMedias = postMediaMap.get(postData.postId) || [];
+          const imageCount = processedMedias.filter(
+            (media) =>
+              media.s3Url.includes("s3.") &&
+              media.s3Url.includes("wasabisys.com") &&
+              !media.s3Url.includes("_thumb") &&
+              this.isImageUrl(media.s3Url)
+          ).length;
+          const videoCount = processedMedias.filter(
+            (media) =>
+              media.s3Url.includes("s3.") &&
+              media.s3Url.includes("wasabisys.com") &&
+              !media.s3Url.includes("_thumb") &&
+              this.isVideoUrl(media.s3Url)
+          ).length;
+
+          console.log(
+            `Post ID ${postData.postId}: ${imageCount} images, ${videoCount} videos`
+          );
+        }
 
         totalProcessed += batch.length;
 
@@ -1524,6 +1722,278 @@ class ForumDetailPageScraper {
   }
 
   /**
+   * Scrape ALL pages of a thread (including existing posts)
+   * This method scrapes every page and every post, regardless of whether they already exist
+   * @param thread - The thread to scrape all pages for
+   */
+  async scrapeAllThreadPages(thread: ForumThread): Promise<void> {
+    try {
+      console.log(
+        `Node ${this.NODE_INDEX}/${
+          this.NODE_COUNT - 1
+        }: Scraping ALL pages for thread: ${thread.threadId}`
+      );
+
+      // Clean and construct the URL
+      let cleanUrl = thread.threadUrl;
+
+      // Remove /unread suffix if present
+      if (cleanUrl.endsWith("/unread")) {
+        cleanUrl = cleanUrl.replace("/unread", "");
+      }
+
+      // Ensure URL ends with /
+      if (!cleanUrl.endsWith("/")) {
+        cleanUrl += "/";
+      }
+
+      const fullUrl = `${this.SITE_URL}${cleanUrl}`;
+
+      // Get total pages for this thread
+      const totalPages = await this.getTotalPages(fullUrl);
+
+      console.log(`Thread has ${totalPages} total pages`);
+
+      // Scrape pages in ASCENDING order (first to last)
+      // Start from lastUpdatedPage + 1, or page 1 if lastUpdatedPage is null
+      const startPage = thread.lastUpdatedPage ? thread.lastUpdatedPage : 1;
+
+      for (let pageNum = startPage; pageNum <= totalPages; pageNum++) {
+        console.log(
+          `Node ${this.NODE_INDEX}/${
+            this.NODE_COUNT - 1
+          }: Scraping page ${pageNum} of ${totalPages} (ALL POSTS MODE, starting from page ${startPage})...`
+        );
+
+        // Handle URL structure: /threads/title.id/page-X or just /threads/title.id/ for page 1
+        const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
+        console.log(`Page URL: ${pageUrl}`);
+
+        // Retry logic: try loading the page up to 3 times
+        let pageLoadSuccess = false;
+        const MAX_RETRIES = 5;
+
+        for (
+          let attempt = 1;
+          attempt <= MAX_RETRIES && !pageLoadSuccess;
+          attempt++
+        ) {
+          try {
+            if (attempt > 1) {
+              console.log(
+                `Retry attempt ${attempt}/${MAX_RETRIES} for page ${pageNum}`
+              );
+            }
+
+            // Add 30-second timeout for page loading
+            await Promise.race([
+              this.page!.goto(pageUrl, {
+                waitUntil: "networkidle2",
+              }),
+              new Promise((_, reject) =>
+                setTimeout(
+                  () => reject(new Error("Page load timeout after 30 seconds")),
+                  30000
+                )
+              ),
+            ]);
+
+            // Handle cookie consent on first page loaded
+            if (pageNum === startPage && attempt === 1) {
+              await this.handleCookieConsent();
+            }
+
+            const posts = await this.scrapePagePosts();
+
+            console.log(
+              `Page ${pageNum}: Found ${posts.length} posts (ALL POSTS MODE - processing all)`
+            );
+
+            // Save ALL posts to database (no filtering for existing posts)
+            await this.saveAllPostsToDatabase(thread.threadId, posts);
+
+            // Update lastUpdatedPage after successful page scraping
+            await ForumThread.update(
+              { lastUpdatedPage: pageNum },
+              { where: { threadId: thread.threadId } }
+            );
+
+            // Clear memory cache after each page is processed
+            await this.clearPageMemoryCache();
+
+            // Increment pages scraped counter
+            this.pagesScraped++;
+
+            // Check if we need to restart browser
+            if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
+              await this.restartBrowser();
+            }
+
+            // Mark page load as successful
+            pageLoadSuccess = true;
+          } catch (error) {
+            console.error(
+              `Error on page ${pageNum}, attempt ${attempt}/${MAX_RETRIES}: ${error}`
+            );
+
+            // If this is not the last attempt, restart browser and retry
+            if (attempt < MAX_RETRIES) {
+              console.log(`Restarting browser before retry...`);
+              await this.restartBrowser();
+              await this.delay(2000); // Wait 2 seconds before retry
+            } else {
+              // Last attempt failed, restart browser and skip entire thread
+              console.error(
+                `Failed to load page ${pageNum} after ${MAX_RETRIES} attempts. Skipping entire thread ${thread.threadId}.`
+              );
+              await this.restartBrowser();
+              this.pagesScraped++;
+              return; // Exit the entire thread scraping
+            }
+          }
+        }
+      }
+
+      // Update detailPageUpdateDate to match lastReplier field after all pages are done
+      await ForumThread.update(
+        { detailPageUpdateDate: thread.lastReplyDate },
+        { where: { threadId: thread.threadId } }
+      );
+
+      console.log(
+        `Completed scraping ALL pages for thread ${thread.threadId} - detailPageUpdateDate set to: ${thread.lastReplyDate}`
+      );
+    } catch (error) {
+      console.error(
+        `Error scraping all pages for thread ${thread.threadId}:`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Save ALL posts to database (including existing ones) with batch processing
+   * This method processes all posts without checking for existing ones
+   * @param threadId - The thread ID
+   * @param posts - All posts to save
+   */
+  private async saveAllPostsToDatabase(
+    threadId: number,
+    posts: PostData[]
+  ): Promise<void> {
+    try {
+      const BATCH_SIZE = 5;
+      let totalProcessed = 0;
+
+      // Delete existing media for these posts first (to avoid duplicates)
+      await ForumMedia.destroy({
+        where: {
+          threadId: threadId,
+          postId: {
+            [Op.in]: posts.map((post) => post.postId),
+          },
+        },
+      });
+
+      // Process posts in batches
+      for (let i = 0; i < posts.length; i += BATCH_SIZE) {
+        const batch = posts.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(posts.length / BATCH_SIZE);
+
+        console.log(
+          `Processing batch ${batchNum}/${totalBatches} (${batch.length} posts) - ALL POSTS MODE`
+        );
+
+        // Process media for this batch in parallel
+        const postMediaMap = await this.processBatchMedia(batch, threadId);
+
+        // Save posts and media to database
+        const dbPromises: Promise<any>[] = [];
+
+        // Save/update ALL posts (without medias field)
+        batch.forEach((postData) => {
+          dbPromises.push(
+            ForumPost.upsert({
+              postId: postData.postId,
+              threadId: threadId,
+              author: postData.author,
+              content: postData.content,
+              postCreatedDate: postData.postCreatedDate,
+              likes: postData.likes,
+            })
+          );
+        });
+
+        // Save media data to ForumMedia table
+        for (const postData of batch) {
+          const processedMedias = postMediaMap.get(postData.postId) || [];
+
+          for (const mediaData of processedMedias) {
+            const { s3Url, hasThumbnail } = mediaData;
+
+            if (s3Url.includes("s3.") && s3Url.includes("wasabisys.com")) {
+              const mediaType = this.isImageUrl(s3Url)
+                ? "img"
+                : this.isVideoUrl(s3Url)
+                ? "mov"
+                : null;
+
+              if (mediaType && !s3Url.includes("_thumb")) {
+                dbPromises.push(
+                  ForumMedia.create({
+                    threadId: threadId,
+                    postId: postData.postId,
+                    link: s3Url,
+                    type: mediaType,
+                    existThumb: hasThumbnail ? 1 : 0,
+                  })
+                );
+              }
+            }
+          }
+        }
+
+        await Promise.allSettled(dbPromises);
+
+        // Log media count for each post in this batch
+        for (const postData of batch) {
+          const processedMedias = postMediaMap.get(postData.postId) || [];
+          const imageCount = processedMedias.filter(
+            (media) =>
+              media.s3Url.includes("s3.") &&
+              media.s3Url.includes("wasabisys.com") &&
+              !media.s3Url.includes("_thumb") &&
+              this.isImageUrl(media.s3Url)
+          ).length;
+          const videoCount = processedMedias.filter(
+            (media) =>
+              media.s3Url.includes("s3.") &&
+              media.s3Url.includes("wasabisys.com") &&
+              !media.s3Url.includes("_thumb") &&
+              this.isVideoUrl(media.s3Url)
+          ).length;
+
+          console.log(
+            `Post ID ${postData.postId}: ${imageCount} images, ${videoCount} videos`
+          );
+        }
+
+        totalProcessed += batch.length;
+
+        // Clear memory after each batch to prevent memory accumulation
+        await this.clearPageMemoryCache();
+      }
+
+      console.log(
+        `✓ Completed processing ALL ${totalProcessed} posts for thread ${threadId} (ALL POSTS MODE)`
+      );
+    } catch (error) {
+      console.error("Error saving all posts to database:", error);
+    }
+  }
+
+  /**
    * Run detail page scraping for a specific thread by threadId
    * @param threadId - The ID of the thread to scrape
    * @returns Promise<ForumThread | null> - The scraped thread data or null if not found
@@ -1548,7 +2018,8 @@ class ForumDetailPageScraper {
       console.log(`Found thread: ${thread.title} (${thread.threadId})`);
 
       // Scrape the thread detail page
-      await this.scrapeThreadDetailPage(thread);
+      await this.scrapeAllThreadPages(thread);
+      // await this.scrapeThreadDetailPage(thread);
 
       console.log(
         `Successfully completed detail page scraping for thread ${threadId}`
@@ -1588,7 +2059,8 @@ class ForumDetailPageScraper {
           `Node ${this.NODE_INDEX}: Processing thread ${processedCount}/${threadsToUpdate.length} - ${thread.title}`
         );
 
-        await this.scrapeThreadDetailPage(thread);
+        // await this.scrapeThreadDetailPage(thread);
+        await this.scrapeAllThreadPages(thread);
 
         // Add delay between threads
         await this.delay(1000);
