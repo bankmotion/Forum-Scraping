@@ -26,7 +26,7 @@ export interface PostData {
   author: string;
   content: string;
   postCreatedDate: string;
-  likes: string;
+  likes: number;
   medias: [string, string][]; // [fullImageUrl, thumbImageUrl] pairs
 }
 
@@ -89,6 +89,33 @@ class ForumDetailPageScraper {
         this.NODE_COUNT - 1
       }`
     );
+  }
+
+  /**
+   * Helper method to convert likes string with K/M/B suffixes to integer
+   */
+  private convertLikesToInt(likesString: string): number {
+    if (!likesString || likesString === "0") {
+      return 0;
+    }
+
+    // Remove any non-numeric characters except K, M, B and decimal point
+    const cleanString = likesString.replace(/[^0-9.KMB]/gi, "");
+
+    // Check for K/M/B suffixes
+    if (cleanString.endsWith("K") || cleanString.endsWith("k")) {
+      const number = parseFloat(cleanString.slice(0, -1));
+      return Math.round(number * 1000);
+    } else if (cleanString.endsWith("M") || cleanString.endsWith("m")) {
+      const number = parseFloat(cleanString.slice(0, -1));
+      return Math.round(number * 1000000);
+    } else if (cleanString.endsWith("B") || cleanString.endsWith("b")) {
+      const number = parseFloat(cleanString.slice(0, -1));
+      return Math.round(number * 1000000000);
+    } else {
+      // No suffix, just parse as integer
+      return parseInt(cleanString) || 0;
+    }
   }
 
   /**
@@ -262,11 +289,8 @@ class ForumDetailPageScraper {
 
       try {
         if (attempt > 1) {
-          console.log(
-            `Retry attempt ${attempt}/${MAX_RETRIES} for attachment: ${attachmentUrl}`
-          );
           // Add delay between retries
-          await this.delay(1000 * attempt); // Progressive delay: 1s, 2s, 3s
+          await this.delay(500 * attempt); // Progressive delay: 500ms, 1s, 1.5s
         }
 
         // console.log(`Downloading from attachment page: ${attachmentUrl}`);
@@ -282,6 +306,18 @@ class ForumDetailPageScraper {
         // Create a new page for this attachment
         attachmentPage = await this.browser.newPage();
 
+        // Clear page cache to avoid eviction issues
+        await attachmentPage.evaluateOnNewDocument(() => {
+          // Clear any cached data
+          if ((globalThis as any).window?.caches) {
+            (globalThis as any).caches.keys().then((names: string[]) => {
+              names.forEach((name: string) =>
+                (globalThis as any).caches.delete(name)
+              );
+            });
+          }
+        });
+
         // Set user agent for the new page
         await attachmentPage.setUserAgent(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -295,30 +331,233 @@ class ForumDetailPageScraper {
         }
 
         // Navigate to the attachment page
-        await attachmentPage.goto(attachmentUrl, {
+        const initialResponse = await attachmentPage.goto(attachmentUrl, {
           waitUntil: "networkidle2",
           timeout: 30000,
         });
+
+        if (!initialResponse || !initialResponse.ok()) {
+          throw new Error(
+            `Failed to load initial attachment page: ${initialResponse?.status()}`
+          );
+        }
 
         // Wait a bit for the page to fully load
         await this.delay(500);
 
-        // Wait for the image to be fully loaded on the page
-        await attachmentPage.waitForSelector("img", { timeout: 10000 });
-
-        // Download the image using the page's context to maintain authentication
-        // Navigate to the image URL directly to get the image data
-        const response = await attachmentPage.goto(attachmentUrl, {
-          waitUntil: "networkidle2",
-          timeout: 30000,
-        });
-
-        if (!response || !response.ok()) {
-          throw new Error(`Failed to load image: ${response?.status()}`);
+        // Handle age verification dialog if present
+        try {
+          const ageConfirmButton = await attachmentPage.$(
+            'button:has-text("I am 18 or older")'
+          );
+          if (ageConfirmButton) {
+            await ageConfirmButton.click();
+            // await this.delay(1000);
+          }
+        } catch (error) {
+          // Age verification dialog not found, continue
         }
 
-        // Get the response body as buffer
-        const imageBuffer = await response.buffer();
+        // Handle cookie consent dialogs
+        try {
+          // Accept all cookies button
+          const acceptAllButton = await attachmentPage.$(
+            'button:has-text("Accept all cookies")'
+          );
+          if (acceptAllButton) {
+            await acceptAllButton.click();
+            // await this.delay(1000);
+          }
+        } catch (error) {
+          // Cookie dialog not found, continue
+        }
+
+        // Wait for the image to be fully loaded on the page
+        try {
+          await attachmentPage.waitForSelector("img", { timeout: 10000 });
+        } catch (error) {
+          // Try waiting for other possible media elements
+          try {
+            await attachmentPage.waitForSelector("video", { timeout: 5000 });
+          } catch (videoError) {}
+        }
+
+        // Check if the page actually contains any media content
+        const hasMediaContent = await attachmentPage.evaluate(() => {
+          const document = (globalThis as any).document;
+          const imgCount = document.querySelectorAll("img").length;
+          const videoCount = document.querySelectorAll("video").length;
+          const bodyText = document.body.textContent || "";
+
+          // Check for common error indicators
+          if (
+            bodyText.includes("age verification") ||
+            bodyText.includes("18 or older")
+          ) {
+            console.log("Age verification detected");
+            return false;
+          }
+
+          if (bodyText.includes("cookies") && bodyText.length < 1000) {
+            console.log("Cookie consent page detected");
+            return false;
+          }
+
+          return imgCount > 0 || videoCount > 0 || bodyText.length > 500;
+        });
+
+        if (!hasMediaContent) {
+          console.log(`Page appears to be empty or blocked, skipping download`);
+          throw new Error(`Page does not contain media content or is blocked`);
+        }
+
+        // Try to find the direct media URL from the page
+        const directMediaUrl = await attachmentPage.evaluate(() => {
+          const document = (globalThis as any).document;
+
+          // Look for img element with src attribute (prioritize) - but exclude attachment pages
+          const img = document.querySelector("img[src]");
+          if (
+            img &&
+            img.src &&
+            !img.src.includes("data:") &&
+            !img.src.includes("avatar") &&
+            !img.src.includes("/attachments/") &&
+            !img.src.endsWith("/")
+          ) {
+            return { url: img.src, type: "img" };
+          }
+
+          // Look for video element - but exclude attachment pages
+          const video = document.querySelector("video source[src]");
+          if (
+            video &&
+            video.src &&
+            !video.src.includes("/attachments/") &&
+            !video.src.endsWith("/")
+          ) {
+            return { url: video.src, type: "video" };
+          }
+
+          // Look for any element with data-src - but exclude attachment pages
+          const dataSrcImg = document.querySelector("img[data-src]");
+          if (
+            dataSrcImg &&
+            dataSrcImg.dataset.src &&
+            !dataSrcImg.dataset.src.includes("/attachments/") &&
+            !dataSrcImg.dataset.src.endsWith("/")
+          ) {
+            return { url: dataSrcImg.dataset.src, type: "data-src" };
+          }
+
+          // Look for any img element that might be hidden or not fully loaded - but exclude attachment pages
+          const allImgs = document.querySelectorAll("img");
+          for (const img of allImgs) {
+            if (
+              img.src &&
+              !img.src.includes("data:") &&
+              !img.src.includes("avatar") &&
+              !img.src.includes("/attachments/") &&
+              !img.src.endsWith("/") &&
+              (img.src.includes(".gif") ||
+                img.src.includes(".jpg") ||
+                img.src.includes(".png"))
+            ) {
+              return { url: img.src, type: "hidden-img" };
+            }
+          }
+
+          // Try to find any media URL in the page content - but exclude attachment pages
+          const pageContent = document.body.innerHTML;
+          const gifMatch = pageContent.match(/https:\/\/[^"'\s]+\.gif/);
+          if (
+            gifMatch &&
+            !gifMatch[0].includes("/attachments/") &&
+            !gifMatch[0].endsWith("/")
+          ) {
+            return { url: gifMatch[0], type: "content-match" };
+          }
+
+          return null;
+        });
+
+        let imageBuffer: Buffer;
+
+        if (directMediaUrl) {
+          // Download directly from the media URL
+
+          try {
+            const response = await attachmentPage.goto(directMediaUrl.url, {
+              waitUntil: "networkidle2",
+              timeout: 30000,
+            });
+
+            if (!response || !response.ok()) {
+              throw new Error(`Failed to load media: ${response?.status()}`);
+            }
+
+            imageBuffer = await response.buffer();
+          } catch (mediaError) {
+            console.log(
+              `Direct media download failed, trying attachment page fallback: ${mediaError}`
+            );
+            // Fallback to attachment page download
+            try {
+              const response = await attachmentPage.goto(attachmentUrl, {
+                waitUntil: "networkidle2",
+                timeout: 30000,
+              });
+
+              if (!response || !response.ok()) {
+                throw new Error(
+                  `Failed to load attachment page: ${response?.status()}`
+                );
+              }
+
+              imageBuffer = await response.buffer();
+            } catch (fallbackError) {
+              console.log(
+                `Attachment page fallback also failed: ${fallbackError}`
+              );
+              throw new Error(
+                `Both direct media and attachment page downloads failed: ${fallbackError}`
+              );
+            }
+          }
+        } else {
+          try {
+            const response = await attachmentPage.goto(attachmentUrl, {
+              waitUntil: "networkidle2",
+              timeout: 30000,
+            });
+
+            if (!response || !response.ok()) {
+              throw new Error(
+                `Failed to load attachment page: ${response?.status()}`
+              );
+            }
+
+            // Try multiple methods to get the buffer to avoid cache eviction issues
+            try {
+              imageBuffer = await response.buffer();
+            } catch (bufferError) {
+              // Alternative method: use page.evaluate to get the content
+              const pageContent = await attachmentPage.evaluate(async () => {
+                const response = await fetch(
+                  (globalThis as any).window.location.href
+                );
+                const arrayBuffer = await response.arrayBuffer();
+                return Array.from(new Uint8Array(arrayBuffer));
+              });
+
+              imageBuffer = Buffer.from(pageContent);
+            }
+          } catch (bufferError) {
+            throw new Error(
+              `Failed to extract content from attachment page: ${bufferError}`
+            );
+          }
+        }
 
         // Close the attachment page before returning success
         if (attachmentPage) {
@@ -328,9 +567,6 @@ class ForumDetailPageScraper {
         return { buffer: imageBuffer, extension: fileExtension };
       } catch (error) {
         lastError = error as Error;
-        console.error(
-          `❌ Error downloading from attachment page ${attachmentUrl} (attempt ${attempt}/${MAX_RETRIES}):`
-        );
 
         // Close the attachment page on error
         if (attachmentPage) {
@@ -347,11 +583,6 @@ class ForumDetailPageScraper {
         }
       }
     }
-
-    // All retries failed
-    console.error(
-      `Failed to download attachment after ${MAX_RETRIES} attempts: ${attachmentUrl}`
-    );
     return null;
   }
 
@@ -450,7 +681,6 @@ class ForumDetailPageScraper {
     const browserConfig = createBrowserConfig(this.mode, tempDir);
 
     const browser = await puppeteer.launch(browserConfig);
-    console.log("Browser initialized");
 
     return { browser, tempDir };
   }
@@ -849,15 +1079,10 @@ class ForumDetailPageScraper {
       const totalPages = await this.getTotalPages(fullUrl);
 
       // Scrape pages in ASCENDING order (first to last)
-      // Start from lastUpdatedPage + 1, or page 1 if lastUpdatedPage is null
+      // Start from lastUpdatedPage, or page 1 if lastUpdatedPage is null
       const startPage = thread.lastUpdatedPage ? thread.lastUpdatedPage : 1;
-      let shouldContinueScraping = true;
 
-      for (
-        let pageNum = startPage;
-        pageNum <= totalPages && shouldContinueScraping;
-        pageNum++
-      ) {
+      for (let pageNum = startPage; pageNum <= totalPages; pageNum++) {
         console.log(
           `Node ${this.NODE_INDEX}/${
             this.NODE_COUNT - 1
@@ -868,9 +1093,9 @@ class ForumDetailPageScraper {
         const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
         console.log(`Page URL: ${pageUrl}`);
 
-        // Retry logic: try loading the page up to 3 times
+        // Retry logic: try loading the page up to 5 times
         let pageLoadSuccess = false;
-        const MAX_RETRIES = 3;
+        const MAX_RETRIES = 5;
 
         for (
           let attempt = 1;
@@ -878,12 +1103,6 @@ class ForumDetailPageScraper {
           attempt++
         ) {
           try {
-            if (attempt > 1) {
-              console.log(
-                `Retry attempt ${attempt}/${MAX_RETRIES} for page ${pageNum}`
-              );
-            }
-
             // Add 30-second timeout for page loading
             await Promise.race([
               this.page!.goto(pageUrl, {
@@ -904,37 +1123,10 @@ class ForumDetailPageScraper {
 
             const posts = await this.scrapePagePosts();
 
-            // Check which posts already exist in database
-            const postIds = posts.map((post) => post.postId);
-            const existingPosts = await ForumPost.findAll({
-              where: {
-                threadId: thread.threadId,
-                postId: { [Op.in]: postIds },
-              },
-              attributes: ["postId"],
-            });
+            console.log(`Page ${pageNum}: Found ${posts.length} posts`);
 
-            const existingPostIds = new Set(
-              existingPosts.map((post) => post.postId)
-            );
-
-            // Filter out posts that already exist
-            const newPosts = posts.filter(
-              (post) => !existingPostIds.has(post.postId)
-            );
-
-            console.log(
-              `Page ${pageNum}: Total posts: ${posts.length}, Existing: ${existingPosts.length}, New: ${newPosts.length}`
-            );
-
-            // If ALL posts already exist, stop scraping (we've reached old content)
-            if (newPosts.length === 0 && postIds.length !== 0) {
-              shouldContinueScraping = false;
-              break;
-            }
-
-            // Save only new posts to database with batch processing
-            await this.savePostsToDatabase(thread.threadId, newPosts);
+            // Save all posts to database with batch processing
+            await this.savePostsToDatabase(thread.threadId, posts);
 
             // Update lastUpdatedPage after successful page scraping
             await ForumThread.update(
@@ -962,7 +1154,6 @@ class ForumDetailPageScraper {
 
             // If this is not the last attempt, restart browser and retry
             if (attempt < MAX_RETRIES) {
-              console.log(`Restarting browser before retry...`);
               await this.restartBrowser();
               await this.delay(2000); // Wait 2 seconds before retry
             } else {
@@ -1091,38 +1282,49 @@ class ForumDetailPageScraper {
             }
 
             // Extract likes count
-            // Format: "cutthefx, XanRodck25, Synth1984 and 8 others"
-            // Or: "cutthefx and 5K others" (can have K, M, B suffixes)
-            // Or: "cutthefx" (just one person)
-            let likes = "0";
+            // Format examples:
+            // 1 user: "username"
+            // 2 users: "username1 and username2"
+            // 3 users: "username1, username2 and username3"
+            // 4+ users: "username1, username2, username3 and 1,295 others"
+            let likes = 0;
             const reactionsLink = element.querySelector(
               '.reactionsBar-link[href*="/reactions"]'
             );
             if (reactionsLink) {
               const text = reactionsLink.textContent || "";
 
-              // Check for "and X others" pattern (X can be like "8", "5K", "1.5M", etc.)
-              const othersMatch = text.match(
-                /and\s+([0-9.]+)([KMB]?)\s+others?/i
-              );
+              // Split by "and" to separate visible names from "others" count
+              const hasAnd = text.includes(" and ");
 
-              if (othersMatch) {
-                const otherCount = othersMatch[1];
-                const suffix = othersMatch[2];
-
-                if (suffix) {
-                  // If there's a K/M/B suffix, use that value as-is (it's approximate total)
-                  likes = otherCount + suffix;
-                } else {
-                  // If plain number, add visible names count
-                  const nameElements = reactionsLink.querySelectorAll("bdi");
-                  const totalLikes = nameElements.length + parseInt(otherCount);
-                  likes = totalLikes.toString();
-                }
+              if (!hasAnd) {
+                // 1 user: "username" - no "and"
+                likes = 1;
               } else {
-                // No "others" text, just count visible names (bdi tags)
-                const nameElements = reactionsLink.querySelectorAll("bdi");
-                likes = nameElements.length.toString();
+                // Split by "and" to get the first part (visible names)
+                const parts = text.split(" and ");
+                const visibleNamesPart = parts[0];
+                const afterAndPart = parts[1];
+
+                // Count commas in the visible names part only
+                const commaCount = (visibleNamesPart.match(/,/g) || []).length;
+                const visibleNamesCount = commaCount + 1; // Number of visible names = comma count + 1
+
+                // Check if there's an "others" count
+                const othersMatch = afterAndPart.match(/([0-9,]+)\s+others?/i);
+
+                if (othersMatch) {
+                  // 4+ users: "username1, username2, username3 and 1,295 others"
+                  const otherCountStr = othersMatch[1].replace(/,/g, ""); // Remove commas from "1,295"
+                  const otherCount = parseInt(otherCountStr);
+                  likes = visibleNamesCount + otherCount;
+                } else if (commaCount === 0) {
+                  // 2 users: "username1 and username2" - no commas in first part
+                  likes = 2;
+                } else {
+                  // 3 users: "username1, username2 and username3" - 1 comma in first part
+                  likes = 3;
+                }
               }
             }
 
@@ -1383,8 +1585,12 @@ class ForumDetailPageScraper {
       }
     }
 
-    // Process all upload tasks in parallel
-    const processingPromises = uploadTasks.map(async (uploadTask) => {
+    // Process upload tasks with some delay to avoid cache pressure
+    const processingPromises = uploadTasks.map(async (uploadTask, index) => {
+      // Add a small delay between concurrent downloads to reduce cache pressure
+      if (index > 0) {
+        await this.delay(100 * index);
+      }
       try {
         let buffer: Buffer | null = null;
 
@@ -1394,7 +1600,21 @@ class ForumDetailPageScraper {
             buffer = result.buffer;
           }
         } else {
-          buffer = await this.s3Service.downloadFile(uploadTask.url);
+          try {
+            buffer = await this.s3Service.downloadFile(uploadTask.url);
+          } catch (rawDownloadError) {
+            // Try attachment page method as fallback for raw images
+            const result = await this.downloadFromAttachmentPage(
+              uploadTask.url
+            );
+            if (result) {
+              buffer = result.buffer;
+            } else {
+              console.log(
+                `✗ Attachment page method also failed for raw image: ${uploadTask.url}`
+              );
+            }
+          }
         }
 
         if (buffer) {
@@ -1419,9 +1639,9 @@ class ForumDetailPageScraper {
             process.env.S3_REGION || "us-east-2"
           }.wasabisys.com/${uploadTask.key}`;
 
-          console.log(
-            `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
-          );
+          // console.log(
+          //   `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
+          // );
           return {
             postId: uploadTask.postId,
             s3Url: finalS3Url,
@@ -1440,7 +1660,7 @@ class ForumDetailPageScraper {
           };
         }
       } catch (error) {
-        console.error(`✗ Processing failed for ${uploadTask.url}:`, error);
+        console.error(`✗ Processing failed for ${uploadTask.url}:`);
         return {
           postId: uploadTask.postId,
           s3Url: uploadTask.url,
@@ -1589,8 +1809,6 @@ class ForumDetailPageScraper {
     try {
       if (!this.page) return;
 
-      console.log("Clearing browser cache and memory...");
-
       // Clear browser cache
       const client = await this.page.target().createCDPSession();
       await client.send("Network.clearBrowserCache");
@@ -1620,8 +1838,6 @@ class ForumDetailPageScraper {
       if (this.mode === "production") {
         await clearSystemCaches();
       }
-
-      console.log("Browser cache and memory cleared successfully");
     } catch (error) {
       console.error("Error clearing browser cache:", error);
     }
@@ -1634,8 +1850,6 @@ class ForumDetailPageScraper {
   async clearPageMemoryCache(): Promise<void> {
     try {
       if (!this.page) return;
-
-      console.log("Clearing page memory cache...");
 
       // Clear browser cache
       const client = await this.page.target().createCDPSession();
@@ -1665,8 +1879,6 @@ class ForumDetailPageScraper {
       if (global.gc) {
         global.gc();
       }
-
-      console.log("Page memory cache cleared successfully");
     } catch (error) {
       console.error("Error clearing page memory cache:", error);
     }
@@ -1674,8 +1886,6 @@ class ForumDetailPageScraper {
 
   async restartBrowser(): Promise<void> {
     try {
-      console.log("Restarting browser...");
-
       // Show memory usage before restart
       await getMemoryUsage();
 
@@ -1699,8 +1909,6 @@ class ForumDetailPageScraper {
 
       // Show memory usage after restart
       await getMemoryUsage();
-
-      console.log("Browser restarted successfully");
     } catch (error) {
       console.error("Error restarting browser:", error);
       throw error;
@@ -1717,157 +1925,6 @@ class ForumDetailPageScraper {
 
     if (this.browser) {
       await this.browser.close();
-      console.log("Detail page scraper closed");
-    }
-  }
-
-  /**
-   * Scrape ALL pages of a thread (including existing posts)
-   * This method scrapes every page and every post, regardless of whether they already exist
-   * @param thread - The thread to scrape all pages for
-   */
-  async scrapeAllThreadPages(thread: ForumThread): Promise<void> {
-    try {
-      console.log(
-        `Node ${this.NODE_INDEX}/${
-          this.NODE_COUNT - 1
-        }: Scraping ALL pages for thread: ${thread.threadId}`
-      );
-
-      // Clean and construct the URL
-      let cleanUrl = thread.threadUrl;
-
-      // Remove /unread suffix if present
-      if (cleanUrl.endsWith("/unread")) {
-        cleanUrl = cleanUrl.replace("/unread", "");
-      }
-
-      // Ensure URL ends with /
-      if (!cleanUrl.endsWith("/")) {
-        cleanUrl += "/";
-      }
-
-      const fullUrl = `${this.SITE_URL}${cleanUrl}`;
-
-      // Get total pages for this thread
-      const totalPages = await this.getTotalPages(fullUrl);
-
-      console.log(`Thread has ${totalPages} total pages`);
-
-      // Scrape pages in ASCENDING order (first to last)
-      // Start from lastUpdatedPage + 1, or page 1 if lastUpdatedPage is null
-      const startPage = thread.lastUpdatedPage ? thread.lastUpdatedPage : 1;
-
-      for (let pageNum = startPage; pageNum <= totalPages; pageNum++) {
-        console.log(
-          `Node ${this.NODE_INDEX}/${
-            this.NODE_COUNT - 1
-          }: Scraping page ${pageNum} of ${totalPages} (ALL POSTS MODE, starting from page ${startPage})...`
-        );
-
-        // Handle URL structure: /threads/title.id/page-X or just /threads/title.id/ for page 1
-        const pageUrl = pageNum === 1 ? fullUrl : `${fullUrl}page-${pageNum}`;
-        console.log(`Page URL: ${pageUrl}`);
-
-        // Retry logic: try loading the page up to 3 times
-        let pageLoadSuccess = false;
-        const MAX_RETRIES = 5;
-
-        for (
-          let attempt = 1;
-          attempt <= MAX_RETRIES && !pageLoadSuccess;
-          attempt++
-        ) {
-          try {
-            if (attempt > 1) {
-              console.log(
-                `Retry attempt ${attempt}/${MAX_RETRIES} for page ${pageNum}`
-              );
-            }
-
-            // Add 30-second timeout for page loading
-            await Promise.race([
-              this.page!.goto(pageUrl, {
-                waitUntil: "networkidle2",
-              }),
-              new Promise((_, reject) =>
-                setTimeout(
-                  () => reject(new Error("Page load timeout after 30 seconds")),
-                  30000
-                )
-              ),
-            ]);
-
-            // Handle cookie consent on first page loaded
-            if (pageNum === startPage && attempt === 1) {
-              await this.handleCookieConsent();
-            }
-
-            const posts = await this.scrapePagePosts();
-
-            console.log(
-              `Page ${pageNum}: Found ${posts.length} posts (ALL POSTS MODE - processing all)`
-            );
-
-            // Save ALL posts to database (no filtering for existing posts)
-            await this.saveAllPostsToDatabase(thread.threadId, posts);
-
-            // Update lastUpdatedPage after successful page scraping
-            await ForumThread.update(
-              { lastUpdatedPage: pageNum },
-              { where: { threadId: thread.threadId } }
-            );
-
-            // Clear memory cache after each page is processed
-            await this.clearPageMemoryCache();
-
-            // Increment pages scraped counter
-            this.pagesScraped++;
-
-            // Check if we need to restart browser
-            if (this.pagesScraped >= this.PAGES_BEFORE_RESTART) {
-              await this.restartBrowser();
-            }
-
-            // Mark page load as successful
-            pageLoadSuccess = true;
-          } catch (error) {
-            console.error(
-              `Error on page ${pageNum}, attempt ${attempt}/${MAX_RETRIES}: ${error}`
-            );
-
-            // If this is not the last attempt, restart browser and retry
-            if (attempt < MAX_RETRIES) {
-              console.log(`Restarting browser before retry...`);
-              await this.restartBrowser();
-              await this.delay(2000); // Wait 2 seconds before retry
-            } else {
-              // Last attempt failed, restart browser and skip entire thread
-              console.error(
-                `Failed to load page ${pageNum} after ${MAX_RETRIES} attempts. Skipping entire thread ${thread.threadId}.`
-              );
-              await this.restartBrowser();
-              this.pagesScraped++;
-              return; // Exit the entire thread scraping
-            }
-          }
-        }
-      }
-
-      // Update detailPageUpdateDate to match lastReplier field after all pages are done
-      await ForumThread.update(
-        { detailPageUpdateDate: thread.lastReplyDate },
-        { where: { threadId: thread.threadId } }
-      );
-
-      console.log(
-        `Completed scraping ALL pages for thread ${thread.threadId} - detailPageUpdateDate set to: ${thread.lastReplyDate}`
-      );
-    } catch (error) {
-      console.error(
-        `Error scraping all pages for thread ${thread.threadId}:`,
-        error
-      );
     }
   }
 
@@ -1973,10 +2030,6 @@ class ForumDetailPageScraper {
               !media.s3Url.includes("_thumb") &&
               this.isVideoUrl(media.s3Url)
           ).length;
-
-          console.log(
-            `Post ID ${postData.postId}: ${imageCount} images, ${videoCount} videos`
-          );
         }
 
         totalProcessed += batch.length;
@@ -2018,8 +2071,7 @@ class ForumDetailPageScraper {
       console.log(`Found thread: ${thread.title} (${thread.threadId})`);
 
       // Scrape the thread detail page
-      await this.scrapeAllThreadPages(thread);
-      // await this.scrapeThreadDetailPage(thread);
+      await this.scrapeThreadDetailPage(thread);
 
       console.log(
         `Successfully completed detail page scraping for thread ${threadId}`
@@ -2059,8 +2111,7 @@ class ForumDetailPageScraper {
           `Node ${this.NODE_INDEX}: Processing thread ${processedCount}/${threadsToUpdate.length} - ${thread.title}`
         );
 
-        // await this.scrapeThreadDetailPage(thread);
-        await this.scrapeAllThreadPages(thread);
+        await this.scrapeThreadDetailPage(thread);
 
         // Add delay between threads
         await this.delay(1000);

@@ -23,6 +23,6 @@ export class ForumPost extends Model {
   @Column(DataType.STRING)
   postCreatedDate!: string;
 
-  @Column(DataType.STRING)
-  likes!: string;
+  @Column(DataType.INTEGER)
+  likes!: number;
 } 

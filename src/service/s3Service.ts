@@ -284,7 +284,6 @@ export class S3Service {
             });
 
       request.on("error", (error) => {
-        console.error(`Download error for ${url}:`, error);
         reject(error);
       });
       

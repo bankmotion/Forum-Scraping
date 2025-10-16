@@ -30,7 +30,7 @@ async function main() {
     await detailPageScraper.run();
 
     // const threadId = 10003071;
-    // const threadId = 7400871;
+    // const threadId = 290271;
     // const detailPageScraper = new ForumDetailPageScraper();
     // const detailPage = await detailPageScraper.runDetailPage(threadId);
     // console.log(detailPage);
