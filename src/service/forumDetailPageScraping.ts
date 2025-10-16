@@ -66,6 +66,9 @@ class ForumDetailPageScraper {
   private readonly MEMORY_CHECK_INTERVAL = 30000; // Check every 10 seconds
   private memoryCheckInterval: NodeJS.Timeout | null = null;
 
+  // Media processing configuration
+  private readonly MEDIA_BATCH_SIZE = 10; // Process media files in batches of 10
+
   constructor() {
     this.cookiesPath = path.join(__dirname, "../../cookies.json");
     this.credentials = {
@@ -1585,72 +1588,97 @@ class ForumDetailPageScraper {
       }
     }
 
-    // Process upload tasks with some delay to avoid cache pressure
-    const processingPromises = uploadTasks.map(async (uploadTask, index) => {
-      // Add a small delay between concurrent downloads to reduce cache pressure
-      if (index > 0) {
-        await this.delay(100 * index);
-      }
-      try {
-        let buffer: Buffer | null = null;
+    // Process upload tasks in batches of 10 to avoid overwhelming the system
+    const results: PromiseSettledResult<{
+      postId: number;
+      s3Url: string;
+      isThumb: number;
+      hasThumb: boolean;
+      success: boolean;
+    }>[] = [];
 
-        if (this.isNotRawImg(uploadTask.url)) {
-          const result = await this.downloadFromAttachmentPage(uploadTask.url);
-          if (result) {
-            buffer = result.buffer;
-          }
-        } else {
-          try {
-            buffer = await this.s3Service.downloadFile(uploadTask.url);
-          } catch (rawDownloadError) {
-            // Try attachment page method as fallback for raw images
-            const result = await this.downloadFromAttachmentPage(
-              uploadTask.url
-            );
+    for (let i = 0; i < uploadTasks.length; i += this.MEDIA_BATCH_SIZE) {
+      const batch = uploadTasks.slice(i, i + this.MEDIA_BATCH_SIZE);
+      const batchNum = Math.floor(i / this.MEDIA_BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(uploadTasks.length / this.MEDIA_BATCH_SIZE);
+      
+      console.log(`Processing media batch ${batchNum}/${totalBatches} (${batch.length} files)...`);
+
+      const processingPromises = batch.map(async (uploadTask, index) => {
+        // Add a small delay between concurrent downloads to reduce cache pressure
+        if (index > 0) {
+          await this.delay(100 * index);
+        }
+        try {
+          let buffer: Buffer | null = null;
+
+          if (this.isNotRawImg(uploadTask.url)) {
+            const result = await this.downloadFromAttachmentPage(uploadTask.url);
             if (result) {
               buffer = result.buffer;
-            } else {
-              console.log(
-                `✗ Attachment page method also failed for raw image: ${uploadTask.url}`
+            }
+          } else {
+            try {
+              buffer = await this.s3Service.downloadFile(uploadTask.url);
+            } catch (rawDownloadError) {
+              // Try attachment page method as fallback for raw images
+              const result = await this.downloadFromAttachmentPage(
+                uploadTask.url
               );
+              if (result) {
+                buffer = result.buffer;
+              } else {
+                console.log(
+                  `✗ Attachment page method also failed for raw image: ${uploadTask.url}`
+                );
+              }
             }
           }
-        }
 
-        if (buffer) {
-          const contentType = this.s3Service.getContentType(uploadTask.url);
-          const uploadCommand = new PutObjectCommand({
-            Bucket: this.s3Service.bucketName,
-            Key: uploadTask.key,
-            Body: buffer,
-            ContentType: contentType,
-            Metadata: {
-              "original-url": uploadTask.url,
-              "upload-timestamp": new Date().toISOString(),
-              "thread-id": threadId.toString(),
-              "post-id": uploadTask.postId.toString(),
-              "is-thumb": uploadTask.isThumb.toString(),
-              "has-thumb": uploadTask.hasThumb.toString(),
-            },
-          });
+          if (buffer) {
+            const contentType = this.s3Service.getContentType(uploadTask.url);
+            const uploadCommand = new PutObjectCommand({
+              Bucket: this.s3Service.bucketName,
+              Key: uploadTask.key,
+              Body: buffer,
+              ContentType: contentType,
+              Metadata: {
+                "original-url": uploadTask.url,
+                "upload-timestamp": new Date().toISOString(),
+                "thread-id": threadId.toString(),
+                "post-id": uploadTask.postId.toString(),
+                "is-thumb": uploadTask.isThumb.toString(),
+                "has-thumb": uploadTask.hasThumb.toString(),
+              },
+            });
 
-          await this.s3Service.s3Client.send(uploadCommand);
-          const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
-            process.env.S3_REGION || "us-east-2"
-          }.wasabisys.com/${uploadTask.key}`;
+            await this.s3Service.s3Client.send(uploadCommand);
+            const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
+              process.env.S3_REGION || "us-east-2"
+            }.wasabisys.com/${uploadTask.key}`;
 
-          // console.log(
-          //   `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
-          // );
-          return {
-            postId: uploadTask.postId,
-            s3Url: finalS3Url,
-            isThumb: uploadTask.isThumb,
-            hasThumb: uploadTask.hasThumb,
-            success: true,
-          };
-        } else {
-          console.error(`✗ Failed to download: ${uploadTask.url}`);
+            // console.log(
+            //   `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
+            // );
+            return {
+              postId: uploadTask.postId,
+              s3Url: finalS3Url,
+              isThumb: uploadTask.isThumb,
+              hasThumb: uploadTask.hasThumb,
+              success: true,
+            };
+          } else {
+            console.error(`✗ Failed to download: ${uploadTask.url}`);
+            return {
+              postId: uploadTask.postId,
+              s3Url: uploadTask.url,
+              isThumb: uploadTask.isThumb,
+              hasThumb: uploadTask.hasThumb,
+              success: false,
+            };
+          }
+        } catch (error) {
+          console.error(`✗ Processing failed for ${uploadTask.url}:`);
           return {
             postId: uploadTask.postId,
             s3Url: uploadTask.url,
@@ -1659,19 +1687,16 @@ class ForumDetailPageScraper {
             success: false,
           };
         }
-      } catch (error) {
-        console.error(`✗ Processing failed for ${uploadTask.url}:`);
-        return {
-          postId: uploadTask.postId,
-          s3Url: uploadTask.url,
-          isThumb: uploadTask.isThumb,
-          hasThumb: uploadTask.hasThumb,
-          success: false,
-        };
-      }
-    });
+      });
 
-    const results = await Promise.allSettled(processingPromises);
+      const batchResults = await Promise.allSettled(processingPromises);
+      results.push(...batchResults);
+
+      // Add a small delay between batches to prevent overwhelming the system
+      if (i + this.MEDIA_BATCH_SIZE < uploadTasks.length) {
+        await this.delay(500);
+      }
+    }
 
     // Group results by post ID
     for (const result of results) {
