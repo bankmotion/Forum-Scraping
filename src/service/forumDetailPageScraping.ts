@@ -296,9 +296,8 @@ class ForumDetailPageScraper {
           await this.delay(500 * attempt); // Progressive delay: 500ms, 1s, 1.5s
         }
 
-        // console.log(`Downloading from attachment page: ${attachmentUrl}`);
-
         if (!this.browser) {
+          console.error(`❌ Browser not initialized for attempt ${attempt}`);
           throw new Error("Browser not initialized");
         }
 
@@ -330,7 +329,6 @@ class ForumDetailPageScraper {
         if (this.page) {
           const cookies = await this.page.cookies();
           await attachmentPage.setCookie(...cookies);
-          // console.log(`Copied ${cookies.length} cookies to attachment page`);
         }
 
         // Navigate to the attachment page
@@ -340,6 +338,7 @@ class ForumDetailPageScraper {
         });
 
         if (!initialResponse || !initialResponse.ok()) {
+          console.error(`❌ Failed to load initial attachment page: ${initialResponse?.status()}`);
           throw new Error(
             `Failed to load initial attachment page: ${initialResponse?.status()}`
           );
@@ -382,7 +381,9 @@ class ForumDetailPageScraper {
           // Try waiting for other possible media elements
           try {
             await attachmentPage.waitForSelector("video", { timeout: 5000 });
-          } catch (videoError) {}
+          } catch (videoError) {
+            console.error(`❌ No media selectors found: img error: ${error}, video error: ${videoError}`);
+          }
         }
 
         // Check if the page actually contains any media content
@@ -397,12 +398,10 @@ class ForumDetailPageScraper {
             bodyText.includes("age verification") ||
             bodyText.includes("18 or older")
           ) {
-            console.log("Age verification detected");
             return false;
           }
 
           if (bodyText.includes("cookies") && bodyText.length < 1000) {
-            console.log("Cookie consent page detected");
             return false;
           }
 
@@ -410,7 +409,7 @@ class ForumDetailPageScraper {
         });
 
         if (!hasMediaContent) {
-          console.log(`Page appears to be empty or blocked, skipping download`);
+          console.error(`❌ Page appears to be empty or blocked, skipping download`);
           throw new Error(`Page does not contain media content or is blocked`);
         }
 
@@ -488,7 +487,6 @@ class ForumDetailPageScraper {
 
         if (directMediaUrl) {
           // Download directly from the media URL
-
           try {
             const response = await attachmentPage.goto(directMediaUrl.url, {
               waitUntil: "networkidle2",
@@ -496,14 +494,13 @@ class ForumDetailPageScraper {
             });
 
             if (!response || !response.ok()) {
+              console.error(`❌ Failed to load direct media: ${response?.status()}`);
               throw new Error(`Failed to load media: ${response?.status()}`);
             }
 
             imageBuffer = await response.buffer();
           } catch (mediaError) {
-            console.log(
-              `Direct media download failed, trying attachment page fallback: ${mediaError}`
-            );
+            console.error(`❌ Direct media download failed: ${mediaError}`);
             // Fallback to attachment page download
             try {
               const response = await attachmentPage.goto(attachmentUrl, {
@@ -512,6 +509,7 @@ class ForumDetailPageScraper {
               });
 
               if (!response || !response.ok()) {
+                console.error(`❌ Failed to load attachment page fallback: ${response?.status()}`);
                 throw new Error(
                   `Failed to load attachment page: ${response?.status()}`
                 );
@@ -519,9 +517,7 @@ class ForumDetailPageScraper {
 
               imageBuffer = await response.buffer();
             } catch (fallbackError) {
-              console.log(
-                `Attachment page fallback also failed: ${fallbackError}`
-              );
+              console.error(`❌ Attachment page fallback also failed: ${fallbackError}`);
               throw new Error(
                 `Both direct media and attachment page downloads failed: ${fallbackError}`
               );
@@ -535,6 +531,7 @@ class ForumDetailPageScraper {
             });
 
             if (!response || !response.ok()) {
+              console.error(`❌ Failed to load attachment page: ${response?.status()}`);
               throw new Error(
                 `Failed to load attachment page: ${response?.status()}`
               );
@@ -544,6 +541,7 @@ class ForumDetailPageScraper {
             try {
               imageBuffer = await response.buffer();
             } catch (bufferError) {
+              console.error(`❌ Buffer method failed, trying alternative method: ${bufferError}`);
               // Alternative method: use page.evaluate to get the content
               const pageContent = await attachmentPage.evaluate(async () => {
                 const response = await fetch(
@@ -554,8 +552,10 @@ class ForumDetailPageScraper {
               });
 
               imageBuffer = Buffer.from(pageContent);
+              console.log(`🔍 Buffer extracted from attachment page: ${imageBuffer.length} bytes`);
             }
           } catch (bufferError) {
+            console.error(`❌ Failed to extract content from attachment page: ${bufferError}`);
             throw new Error(
               `Failed to extract content from attachment page: ${bufferError}`
             );
@@ -570,22 +570,26 @@ class ForumDetailPageScraper {
         return { buffer: imageBuffer, extension: fileExtension };
       } catch (error) {
         lastError = error as Error;
+        console.error(`❌ Download attempt ${attempt} failed: ${error}`);
 
         // Close the attachment page on error
         if (attachmentPage) {
           try {
             await attachmentPage.close();
           } catch (closeError) {
-            console.error("Error closing attachment page:", closeError);
+            console.error(`❌ Error closing attachment page: ${closeError}`);
           }
         }
 
         // If this is the last attempt, don't continue
         if (attempt === MAX_RETRIES) {
+          console.error(`❌ All ${MAX_RETRIES} download attempts failed for: ${attachmentUrl}`);
+          console.error(`❌ Last error: ${lastError}`);
           break;
         }
       }
     }
+    console.error(`❌ Download failed after ${MAX_RETRIES} attempts: ${attachmentUrl}`);
     return null;
   }
 
