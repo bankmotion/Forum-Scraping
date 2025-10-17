@@ -1173,8 +1173,33 @@ class ForumDetailPageScraper {
 
             console.log(`Page ${pageNum}: Found ${posts.length} posts`);
 
-            // Save all posts to database with batch processing
-            await this.savePostsToDatabase(thread.threadId, posts);
+            // Check if posts count is 0 - indicates page not loaded properly
+            if (posts.length === 0) {
+              console.log(`⚠️ Page ${pageNum} has 0 posts - page may not be loaded properly. Waiting 1 minute before reload...`);
+              await this.delay(60000); // Wait 1 minute (60 seconds)
+              
+              console.log(`🔄 Reloading page ${pageNum} after 1 minute delay...`);
+              // Reload the current page
+              await this.page!.reload({ waitUntil: "networkidle2" });
+              
+              // Handle cookie consent after reload
+              await this.handleCookieConsent();
+              
+              // Try scraping posts again after reload
+              const reloadedPosts = await this.scrapePagePosts();
+              console.log(`Page ${pageNum} after reload: Found ${reloadedPosts.length} posts`);
+              
+              // If still 0 posts after reload, log warning but continue
+              if (reloadedPosts.length === 0) {
+                console.log(`⚠️ Page ${pageNum} still has 0 posts after reload - continuing anyway`);
+              }
+              
+              // Use the reloaded posts for database saving
+              await this.savePostsToDatabase(thread.threadId, reloadedPosts);
+            } else {
+              // Save all posts to database with batch processing
+              await this.savePostsToDatabase(thread.threadId, posts);
+            }
 
             // Update lastUpdatedPage after successful page scraping
             await ForumThread.update(
