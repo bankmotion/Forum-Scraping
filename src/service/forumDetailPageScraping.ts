@@ -1677,15 +1677,11 @@ class ForumDetailPageScraper {
             let buffer: Buffer | null = null;
 
             if (this.isNotRawImg(uploadTask.url)) {
-              console.log(`🔍 Processing attachment page: ${uploadTask.url}`);
               const result = await this.downloadFromAttachmentPage(
                 uploadTask.url
               );
               if (result) {
                 buffer = result.buffer;
-                console.log(
-                  `✅ Downloaded attachment: ${uploadTask.url} (${buffer.length} bytes)`
-                );
               } else {
                 console.error(
                   `❌ Failed to download attachment page: ${uploadTask.url}`
@@ -1693,11 +1689,7 @@ class ForumDetailPageScraper {
               }
             } else {
               try {
-                console.log(`🔍 Downloading raw file: ${uploadTask.url}`);
                 buffer = await this.s3Service.downloadFile(uploadTask.url);
-                console.log(
-                  `✅ Downloaded raw file: ${uploadTask.url} (${buffer.length} bytes)`
-                );
               } catch (rawDownloadError) {
                 console.error(
                   `❌ Raw download failed, trying attachment page fallback: ${uploadTask.url}`
