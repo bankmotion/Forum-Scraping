@@ -287,7 +287,13 @@ class ForumDetailPageScraper {
     const MAX_RETRIES = 3;
     let lastError: Error | null = null;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // Add overall timeout for the entire function
+    const overallTimeout = new Promise<null>((_, reject) => {
+      setTimeout(() => reject(new Error(`DownloadFromAttachmentPage timeout after 120 seconds for: ${attachmentUrl}`)), 120000);
+    });
+
+    const downloadPromise = (async () => {
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       let attachmentPage: Page | null = null;
 
       try {
@@ -588,9 +594,13 @@ class ForumDetailPageScraper {
           break;
         }
       }
-    }
-    console.error(`❌ Download failed after ${MAX_RETRIES} attempts: ${attachmentUrl}`);
-    return null;
+      }
+      console.error(`❌ Download failed after ${MAX_RETRIES} attempts: ${attachmentUrl}`);
+      return null;
+    })();
+
+    // Race between download and overall timeout
+    return Promise.race([downloadPromise, overallTimeout]);
   }
 
   /**
@@ -1613,66 +1623,88 @@ class ForumDetailPageScraper {
         if (index > 0) {
           await this.delay(100 * index);
         }
-        try {
-          let buffer: Buffer | null = null;
+        
+        // Add timeout wrapper to prevent hanging
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`Processing timeout after 60 seconds for: ${uploadTask.url}`)), 60000);
+        });
+        
+        const processingPromise = (async () => {
+          try {
+            let buffer: Buffer | null = null;
 
-          if (this.isNotRawImg(uploadTask.url)) {
-            const result = await this.downloadFromAttachmentPage(uploadTask.url);
-            if (result) {
-              buffer = result.buffer;
-            }
-          } else {
-            try {
-              buffer = await this.s3Service.downloadFile(uploadTask.url);
-            } catch (rawDownloadError) {
-              // Try attachment page method as fallback for raw images
-              const result = await this.downloadFromAttachmentPage(
-                uploadTask.url
-              );
+            if (this.isNotRawImg(uploadTask.url)) {
+              console.log(`🔍 Processing attachment page: ${uploadTask.url}`);
+              const result = await this.downloadFromAttachmentPage(uploadTask.url);
               if (result) {
                 buffer = result.buffer;
+                console.log(`✅ Downloaded attachment: ${uploadTask.url} (${buffer.length} bytes)`);
               } else {
-                console.log(
-                  `✗ Attachment page method also failed for raw image: ${uploadTask.url}`
+                console.error(`❌ Failed to download attachment page: ${uploadTask.url}`);
+              }
+            } else {
+              try {
+                console.log(`🔍 Downloading raw file: ${uploadTask.url}`);
+                buffer = await this.s3Service.downloadFile(uploadTask.url);
+                console.log(`✅ Downloaded raw file: ${uploadTask.url} (${buffer.length} bytes)`);
+              } catch (rawDownloadError) {
+                console.error(`❌ Raw download failed, trying attachment page fallback: ${uploadTask.url}`);
+                // Try attachment page method as fallback for raw images
+                const result = await this.downloadFromAttachmentPage(
+                  uploadTask.url
                 );
+                if (result) {
+                  buffer = result.buffer;
+                  console.log(`✅ Fallback download successful: ${uploadTask.url} (${buffer.length} bytes)`);
+                } else {
+                  console.error(`❌ Attachment page method also failed for raw image: ${uploadTask.url}`);
+                }
               }
             }
-          }
 
-          if (buffer) {
-            const contentType = this.s3Service.getContentType(uploadTask.url);
-            const uploadCommand = new PutObjectCommand({
-              Bucket: this.s3Service.bucketName,
-              Key: uploadTask.key,
-              Body: buffer,
-              ContentType: contentType,
-              Metadata: {
-                "original-url": uploadTask.url,
-                "upload-timestamp": new Date().toISOString(),
-                "thread-id": threadId.toString(),
-                "post-id": uploadTask.postId.toString(),
-                "is-thumb": uploadTask.isThumb.toString(),
-                "has-thumb": uploadTask.hasThumb.toString(),
-              },
-            });
+            if (buffer) {
+              console.log(`🔍 Uploading to S3: ${uploadTask.url} -> ${uploadTask.key}`);
+              const contentType = this.s3Service.getContentType(uploadTask.url);
+              const uploadCommand = new PutObjectCommand({
+                Bucket: this.s3Service.bucketName,
+                Key: uploadTask.key,
+                Body: buffer,
+                ContentType: contentType,
+                Metadata: {
+                  "original-url": uploadTask.url,
+                  "upload-timestamp": new Date().toISOString(),
+                  "thread-id": threadId.toString(),
+                  "post-id": uploadTask.postId.toString(),
+                  "is-thumb": uploadTask.isThumb.toString(),
+                  "has-thumb": uploadTask.hasThumb.toString(),
+                },
+              });
 
-            await this.s3Service.s3Client.send(uploadCommand);
-            const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
-              process.env.S3_REGION || "us-east-2"
-            }.wasabisys.com/${uploadTask.key}`;
+              await this.s3Service.s3Client.send(uploadCommand);
+              const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
+                process.env.S3_REGION || "us-east-2"
+              }.wasabisys.com/${uploadTask.key}`;
 
-            // console.log(
-            //   `✓ Uploaded: ${uploadTask.url} -> ${finalS3Url} (thumb: ${uploadTask.isThumb})`
-            // );
-            return {
-              postId: uploadTask.postId,
-              s3Url: finalS3Url,
-              isThumb: uploadTask.isThumb,
-              hasThumb: uploadTask.hasThumb,
-              success: true,
-            };
-          } else {
-            console.error(`✗ Failed to download: ${uploadTask.url}`);
+              console.log(`✅ Uploaded successfully: ${uploadTask.url} -> ${finalS3Url}`);
+              return {
+                postId: uploadTask.postId,
+                s3Url: finalS3Url,
+                isThumb: uploadTask.isThumb,
+                hasThumb: uploadTask.hasThumb,
+                success: true,
+              };
+            } else {
+              console.error(`❌ Failed to download: ${uploadTask.url}`);
+              return {
+                postId: uploadTask.postId,
+                s3Url: uploadTask.url,
+                isThumb: uploadTask.isThumb,
+                hasThumb: uploadTask.hasThumb,
+                success: false,
+              };
+            }
+          } catch (error) {
+            console.error(`❌ Processing failed for ${uploadTask.url}: ${error}`);
             return {
               postId: uploadTask.postId,
               s3Url: uploadTask.url,
@@ -1681,16 +1713,16 @@ class ForumDetailPageScraper {
               success: false,
             };
           }
-        } catch (error) {
-          console.error(`✗ Processing failed for ${uploadTask.url}:`);
-          return {
-            postId: uploadTask.postId,
-            s3Url: uploadTask.url,
-            isThumb: uploadTask.isThumb,
-            hasThumb: uploadTask.hasThumb,
-            success: false,
-          };
-        }
+        })();
+
+        // Race between processing and timeout
+        return Promise.race([processingPromise, timeoutPromise]) as Promise<{
+          postId: number;
+          s3Url: string;
+          isThumb: number;
+          hasThumb: boolean;
+          success: boolean;
+        }>;
       });
 
       const batchResults = await Promise.allSettled(processingPromises);
