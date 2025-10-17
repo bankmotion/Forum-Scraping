@@ -289,225 +289,269 @@ class ForumDetailPageScraper {
 
     // Add overall timeout for the entire function
     const overallTimeout = new Promise<null>((_, reject) => {
-      setTimeout(() => reject(new Error(`DownloadFromAttachmentPage timeout after 120 seconds for: ${attachmentUrl}`)), 120000);
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `DownloadFromAttachmentPage timeout after 120 seconds for: ${attachmentUrl}`
+            )
+          ),
+        120000
+      );
     });
 
     const downloadPromise = (async () => {
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      let attachmentPage: Page | null = null;
+        let attachmentPage: Page | null = null;
 
-      try {
-        if (attempt > 1) {
-          // Add delay between retries
-          await this.delay(500 * attempt); // Progressive delay: 500ms, 1s, 1.5s
-        }
-
-        if (!this.browser) {
-          console.error(`❌ Browser not initialized for attempt ${attempt}`);
-          throw new Error("Browser not initialized");
-        }
-
-        // Extract file extension from the attachment URL
-        const fileExtension =
-          this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
-
-        // Create a new page for this attachment
-        attachmentPage = await this.browser.newPage();
-
-        // Clear page cache to avoid eviction issues
-        await attachmentPage.evaluateOnNewDocument(() => {
-          // Clear any cached data
-          if ((globalThis as any).window?.caches) {
-            (globalThis as any).caches.keys().then((names: string[]) => {
-              names.forEach((name: string) =>
-                (globalThis as any).caches.delete(name)
-              );
-            });
-          }
-        });
-
-        // Set user agent for the new page
-        await attachmentPage.setUserAgent(
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        );
-
-        // Copy cookies from the main page to ensure authentication
-        if (this.page) {
-          const cookies = await this.page.cookies();
-          await attachmentPage.setCookie(...cookies);
-        }
-
-        // Navigate to the attachment page
-        const initialResponse = await attachmentPage.goto(attachmentUrl, {
-          waitUntil: "networkidle2",
-          timeout: 30000,
-        });
-
-        if (!initialResponse || !initialResponse.ok()) {
-          console.error(`❌ Failed to load initial attachment page: ${initialResponse?.status()}`);
-          throw new Error(
-            `Failed to load initial attachment page: ${initialResponse?.status()}`
-          );
-        }
-
-        // Wait a bit for the page to fully load
-        await this.delay(500);
-
-        // Handle age verification dialog if present
         try {
-          const ageConfirmButton = await attachmentPage.$(
-            'button:has-text("I am 18 or older")'
-          );
-          if (ageConfirmButton) {
-            await ageConfirmButton.click();
-            // await this.delay(1000);
+          if (attempt > 1) {
+            // Add delay between retries
+            await this.delay(500 * attempt); // Progressive delay: 500ms, 1s, 1.5s
           }
-        } catch (error) {
-          // Age verification dialog not found, continue
-        }
 
-        // Handle cookie consent dialogs
-        try {
-          // Accept all cookies button
-          const acceptAllButton = await attachmentPage.$(
-            'button:has-text("Accept all cookies")'
-          );
-          if (acceptAllButton) {
-            await acceptAllButton.click();
-            // await this.delay(1000);
+          if (!this.browser) {
+            console.error(`❌ Browser not initialized for attempt ${attempt}`);
+            throw new Error("Browser not initialized");
           }
-        } catch (error) {
-          // Cookie dialog not found, continue
-        }
 
-        // Wait for the image to be fully loaded on the page
-        try {
-          await attachmentPage.waitForSelector("img", { timeout: 10000 });
-        } catch (error) {
-          // Try waiting for other possible media elements
+          // Extract file extension from the attachment URL
+          const fileExtension =
+            this.extractFileExtensionFromAttachmentUrl(attachmentUrl);
+
+          // Create a new page for this attachment
+          attachmentPage = await this.browser.newPage();
+
+          // Clear page cache to avoid eviction issues
+          await attachmentPage.evaluateOnNewDocument(() => {
+            // Clear any cached data
+            if ((globalThis as any).window?.caches) {
+              (globalThis as any).caches.keys().then((names: string[]) => {
+                names.forEach((name: string) =>
+                  (globalThis as any).caches.delete(name)
+                );
+              });
+            }
+          });
+
+          // Set user agent for the new page
+          await attachmentPage.setUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+          );
+
+          // Copy cookies from the main page to ensure authentication
+          if (this.page) {
+            const cookies = await this.page.cookies();
+            await attachmentPage.setCookie(...cookies);
+          }
+
+          // Navigate to the attachment page
+          const initialResponse = await attachmentPage.goto(attachmentUrl, {
+            waitUntil: "networkidle2",
+            timeout: 30000,
+          });
+
+          if (!initialResponse || !initialResponse.ok()) {
+            console.error(
+              `❌ Failed to load initial attachment page: ${initialResponse?.status()}`
+            );
+            throw new Error(
+              `Failed to load initial attachment page: ${initialResponse?.status()}`
+            );
+          }
+
+          // Wait a bit for the page to fully load
+          await this.delay(500);
+
+          // Handle age verification dialog if present
           try {
-            await attachmentPage.waitForSelector("video", { timeout: 5000 });
-          } catch (videoError) {
-            console.error(`❌ No media selectors found: img error: ${error}, video error: ${videoError}`);
-          }
-        }
-
-        // Check if the page actually contains any media content
-        const hasMediaContent = await attachmentPage.evaluate(() => {
-          const document = (globalThis as any).document;
-          const imgCount = document.querySelectorAll("img").length;
-          const videoCount = document.querySelectorAll("video").length;
-          const bodyText = document.body.textContent || "";
-
-          // Check for common error indicators
-          if (
-            bodyText.includes("age verification") ||
-            bodyText.includes("18 or older")
-          ) {
-            return false;
+            const ageConfirmButton = await attachmentPage.$(
+              'button:has-text("I am 18 or older")'
+            );
+            if (ageConfirmButton) {
+              await ageConfirmButton.click();
+              // await this.delay(1000);
+            }
+          } catch (error) {
+            // Age verification dialog not found, continue
           }
 
-          if (bodyText.includes("cookies") && bodyText.length < 1000) {
-            return false;
+          // Handle cookie consent dialogs
+          try {
+            // Accept all cookies button
+            const acceptAllButton = await attachmentPage.$(
+              'button:has-text("Accept all cookies")'
+            );
+            if (acceptAllButton) {
+              await acceptAllButton.click();
+              // await this.delay(1000);
+            }
+          } catch (error) {
+            // Cookie dialog not found, continue
           }
 
-          return imgCount > 0 || videoCount > 0 || bodyText.length > 500;
-        });
-
-        if (!hasMediaContent) {
-          console.error(`❌ Page appears to be empty or blocked, skipping download`);
-          throw new Error(`Page does not contain media content or is blocked`);
-        }
-
-        // Try to find the direct media URL from the page
-        const directMediaUrl = await attachmentPage.evaluate(() => {
-          const document = (globalThis as any).document;
-
-          // Look for img element with src attribute (prioritize) - but exclude attachment pages
-          const img = document.querySelector("img[src]");
-          if (
-            img &&
-            img.src &&
-            !img.src.includes("data:") &&
-            !img.src.includes("avatar") &&
-            !img.src.includes("/attachments/") &&
-            !img.src.endsWith("/")
-          ) {
-            return { url: img.src, type: "img" };
+          // Wait for the image to be fully loaded on the page
+          try {
+            await attachmentPage.waitForSelector("img", { timeout: 10000 });
+          } catch (error) {
+            // Try waiting for other possible media elements
+            try {
+              await attachmentPage.waitForSelector("video", { timeout: 5000 });
+            } catch (videoError) {
+              console.error(
+                `❌ No media selectors found: img error: ${error}, video error: ${videoError}`
+              );
+            }
           }
 
-          // Look for video element - but exclude attachment pages
-          const video = document.querySelector("video source[src]");
-          if (
-            video &&
-            video.src &&
-            !video.src.includes("/attachments/") &&
-            !video.src.endsWith("/")
-          ) {
-            return { url: video.src, type: "video" };
-          }
+          // Check if the page actually contains any media content
+          const hasMediaContent = await attachmentPage.evaluate(() => {
+            const document = (globalThis as any).document;
+            const imgCount = document.querySelectorAll("img").length;
+            const videoCount = document.querySelectorAll("video").length;
+            const bodyText = document.body.textContent || "";
 
-          // Look for any element with data-src - but exclude attachment pages
-          const dataSrcImg = document.querySelector("img[data-src]");
-          if (
-            dataSrcImg &&
-            dataSrcImg.dataset.src &&
-            !dataSrcImg.dataset.src.includes("/attachments/") &&
-            !dataSrcImg.dataset.src.endsWith("/")
-          ) {
-            return { url: dataSrcImg.dataset.src, type: "data-src" };
-          }
-
-          // Look for any img element that might be hidden or not fully loaded - but exclude attachment pages
-          const allImgs = document.querySelectorAll("img");
-          for (const img of allImgs) {
+            // Check for common error indicators
             if (
+              bodyText.includes("age verification") ||
+              bodyText.includes("18 or older")
+            ) {
+              return false;
+            }
+
+            if (bodyText.includes("cookies") && bodyText.length < 1000) {
+              return false;
+            }
+
+            return imgCount > 0 || videoCount > 0 || bodyText.length > 500;
+          });
+
+          if (!hasMediaContent) {
+            console.error(
+              `❌ Page appears to be empty or blocked, skipping download`
+            );
+            throw new Error(
+              `Page does not contain media content or is blocked`
+            );
+          }
+
+          // Try to find the direct media URL from the page
+          const directMediaUrl = await attachmentPage.evaluate(() => {
+            const document = (globalThis as any).document;
+
+            // Look for img element with src attribute (prioritize) - but exclude attachment pages
+            const img = document.querySelector("img[src]");
+            if (
+              img &&
               img.src &&
               !img.src.includes("data:") &&
               !img.src.includes("avatar") &&
               !img.src.includes("/attachments/") &&
-              !img.src.endsWith("/") &&
-              (img.src.includes(".gif") ||
-                img.src.includes(".jpg") ||
-                img.src.includes(".png"))
+              !img.src.endsWith("/")
             ) {
-              return { url: img.src, type: "hidden-img" };
-            }
-          }
-
-          // Try to find any media URL in the page content - but exclude attachment pages
-          const pageContent = document.body.innerHTML;
-          const gifMatch = pageContent.match(/https:\/\/[^"'\s]+\.gif/);
-          if (
-            gifMatch &&
-            !gifMatch[0].includes("/attachments/") &&
-            !gifMatch[0].endsWith("/")
-          ) {
-            return { url: gifMatch[0], type: "content-match" };
-          }
-
-          return null;
-        });
-
-        let imageBuffer: Buffer;
-
-        if (directMediaUrl) {
-          // Download directly from the media URL
-          try {
-            const response = await attachmentPage.goto(directMediaUrl.url, {
-              waitUntil: "networkidle2",
-              timeout: 30000,
-            });
-
-            if (!response || !response.ok()) {
-              console.error(`❌ Failed to load direct media: ${response?.status()}`);
-              throw new Error(`Failed to load media: ${response?.status()}`);
+              return { url: img.src, type: "img" };
             }
 
-            imageBuffer = await response.buffer();
-          } catch (mediaError) {
-            console.error(`❌ Direct media download failed: ${mediaError}`);
-            // Fallback to attachment page download
+            // Look for video element - but exclude attachment pages
+            const video = document.querySelector("video source[src]");
+            if (
+              video &&
+              video.src &&
+              !video.src.includes("/attachments/") &&
+              !video.src.endsWith("/")
+            ) {
+              return { url: video.src, type: "video" };
+            }
+
+            // Look for any element with data-src - but exclude attachment pages
+            const dataSrcImg = document.querySelector("img[data-src]");
+            if (
+              dataSrcImg &&
+              dataSrcImg.dataset.src &&
+              !dataSrcImg.dataset.src.includes("/attachments/") &&
+              !dataSrcImg.dataset.src.endsWith("/")
+            ) {
+              return { url: dataSrcImg.dataset.src, type: "data-src" };
+            }
+
+            // Look for any img element that might be hidden or not fully loaded - but exclude attachment pages
+            const allImgs = document.querySelectorAll("img");
+            for (const img of allImgs) {
+              if (
+                img.src &&
+                !img.src.includes("data:") &&
+                !img.src.includes("avatar") &&
+                !img.src.includes("/attachments/") &&
+                !img.src.endsWith("/") &&
+                (img.src.includes(".gif") ||
+                  img.src.includes(".jpg") ||
+                  img.src.includes(".png"))
+              ) {
+                return { url: img.src, type: "hidden-img" };
+              }
+            }
+
+            // Try to find any media URL in the page content - but exclude attachment pages
+            const pageContent = document.body.innerHTML;
+            const gifMatch = pageContent.match(/https:\/\/[^"'\s]+\.gif/);
+            if (
+              gifMatch &&
+              !gifMatch[0].includes("/attachments/") &&
+              !gifMatch[0].endsWith("/")
+            ) {
+              return { url: gifMatch[0], type: "content-match" };
+            }
+
+            return null;
+          });
+
+          let imageBuffer: Buffer;
+
+          if (directMediaUrl) {
+            // Download directly from the media URL
+            try {
+              const response = await attachmentPage.goto(directMediaUrl.url, {
+                waitUntil: "networkidle2",
+                timeout: 30000,
+              });
+
+              if (!response || !response.ok()) {
+                console.error(
+                  `❌ Failed to load direct media: ${response?.status()}`
+                );
+                throw new Error(`Failed to load media: ${response?.status()}`);
+              }
+
+              imageBuffer = await response.buffer();
+            } catch (mediaError) {
+              console.error(`❌ Direct media download failed: ${mediaError}`);
+              // Fallback to attachment page download
+              try {
+                const response = await attachmentPage.goto(attachmentUrl, {
+                  waitUntil: "networkidle2",
+                  timeout: 30000,
+                });
+
+                if (!response || !response.ok()) {
+                  console.error(
+                    `❌ Failed to load attachment page fallback: ${response?.status()}`
+                  );
+                  throw new Error(
+                    `Failed to load attachment page: ${response?.status()}`
+                  );
+                }
+
+                imageBuffer = await response.buffer();
+              } catch (fallbackError) {
+                console.error(
+                  `❌ Attachment page fallback also failed: ${fallbackError}`
+                );
+                throw new Error(
+                  `Both direct media and attachment page downloads failed: ${fallbackError}`
+                );
+              }
+            }
+          } else {
             try {
               const response = await attachmentPage.goto(attachmentUrl, {
                 waitUntil: "networkidle2",
@@ -515,87 +559,74 @@ class ForumDetailPageScraper {
               });
 
               if (!response || !response.ok()) {
-                console.error(`❌ Failed to load attachment page fallback: ${response?.status()}`);
+                console.error(
+                  `❌ Failed to load attachment page: ${response?.status()}`
+                );
                 throw new Error(
                   `Failed to load attachment page: ${response?.status()}`
                 );
               }
 
-              imageBuffer = await response.buffer();
-            } catch (fallbackError) {
-              console.error(`❌ Attachment page fallback also failed: ${fallbackError}`);
-              throw new Error(
-                `Both direct media and attachment page downloads failed: ${fallbackError}`
-              );
-            }
-          }
-        } else {
-          try {
-            const response = await attachmentPage.goto(attachmentUrl, {
-              waitUntil: "networkidle2",
-              timeout: 30000,
-            });
-
-            if (!response || !response.ok()) {
-              console.error(`❌ Failed to load attachment page: ${response?.status()}`);
-              throw new Error(
-                `Failed to load attachment page: ${response?.status()}`
-              );
-            }
-
-            // Try multiple methods to get the buffer to avoid cache eviction issues
-            try {
-              imageBuffer = await response.buffer();
-            } catch (bufferError) {
-              console.error(`❌ Buffer method failed, trying alternative method: ${bufferError}`);
-              // Alternative method: use page.evaluate to get the content
-              const pageContent = await attachmentPage.evaluate(async () => {
-                const response = await fetch(
-                  (globalThis as any).window.location.href
+              // Try multiple methods to get the buffer to avoid cache eviction issues
+              try {
+                imageBuffer = await response.buffer();
+              } catch (bufferError) {
+                console.error(
+                  `❌ Buffer method failed, trying alternative method: ${bufferError}`
                 );
-                const arrayBuffer = await response.arrayBuffer();
-                return Array.from(new Uint8Array(arrayBuffer));
-              });
+                // Alternative method: use page.evaluate to get the content
+                const pageContent = await attachmentPage.evaluate(async () => {
+                  const response = await fetch(
+                    (globalThis as any).window.location.href
+                  );
+                  const arrayBuffer = await response.arrayBuffer();
+                  return Array.from(new Uint8Array(arrayBuffer));
+                });
 
-              imageBuffer = Buffer.from(pageContent);
-              console.log(`🔍 Buffer extracted from attachment page: ${imageBuffer.length} bytes`);
+                imageBuffer = Buffer.from(pageContent);
+              }
+            } catch (bufferError) {
+              console.error(
+                `❌ Failed to extract content from attachment page: ${bufferError}`
+              );
+              throw new Error(
+                `Failed to extract content from attachment page: ${bufferError}`
+              );
             }
-          } catch (bufferError) {
-            console.error(`❌ Failed to extract content from attachment page: ${bufferError}`);
-            throw new Error(
-              `Failed to extract content from attachment page: ${bufferError}`
-            );
           }
-        }
 
-        // Close the attachment page before returning success
-        if (attachmentPage) {
-          await attachmentPage.close();
-        }
-
-        return { buffer: imageBuffer, extension: fileExtension };
-      } catch (error) {
-        lastError = error as Error;
-        console.error(`❌ Download attempt ${attempt} failed: ${error}`);
-
-        // Close the attachment page on error
-        if (attachmentPage) {
-          try {
+          // Close the attachment page before returning success
+          if (attachmentPage) {
             await attachmentPage.close();
-          } catch (closeError) {
-            console.error(`❌ Error closing attachment page: ${closeError}`);
+          }
+
+          return { buffer: imageBuffer, extension: fileExtension };
+        } catch (error) {
+          lastError = error as Error;
+          console.error(`❌ Download attempt ${attempt} failed: ${error}`);
+
+          // Close the attachment page on error
+          if (attachmentPage) {
+            try {
+              await attachmentPage.close();
+            } catch (closeError) {
+              console.error(`❌ Error closing attachment page: ${closeError}`);
+            }
+          }
+
+          // If this is the last attempt, don't continue
+          if (attempt === MAX_RETRIES) {
+            console.error(
+              `❌ All ${MAX_RETRIES} download attempts failed for: ${attachmentUrl}`
+            );
+            console.error(`❌ Last error: ${lastError}`);
+            break;
           }
         }
-
-        // If this is the last attempt, don't continue
-        if (attempt === MAX_RETRIES) {
-          console.error(`❌ All ${MAX_RETRIES} download attempts failed for: ${attachmentUrl}`);
-          console.error(`❌ Last error: ${lastError}`);
-          break;
-        }
       }
-      }
-      console.error(`❌ Download failed after ${MAX_RETRIES} attempts: ${attachmentUrl}`);
+      console.error(
+        `❌ Download failed after ${MAX_RETRIES} attempts: ${attachmentUrl}`
+      );
       return null;
     })();
 
@@ -1614,56 +1645,78 @@ class ForumDetailPageScraper {
     for (let i = 0; i < uploadTasks.length; i += this.MEDIA_BATCH_SIZE) {
       const batch = uploadTasks.slice(i, i + this.MEDIA_BATCH_SIZE);
       const batchNum = Math.floor(i / this.MEDIA_BATCH_SIZE) + 1;
-      const totalBatches = Math.ceil(uploadTasks.length / this.MEDIA_BATCH_SIZE);
-      
-      console.log(`Processing media batch ${batchNum}/${totalBatches} (${batch.length} files)...`);
+      const totalBatches = Math.ceil(
+        uploadTasks.length / this.MEDIA_BATCH_SIZE
+      );
+
+      console.log(
+        `Processing media batch ${batchNum}/${totalBatches} (${batch.length} files)...`
+      );
 
       const processingPromises = batch.map(async (uploadTask, index) => {
         // Add a small delay between concurrent downloads to reduce cache pressure
         if (index > 0) {
           await this.delay(100 * index);
         }
-        
+
         // Add timeout wrapper to prevent hanging
         const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error(`Processing timeout after 60 seconds for: ${uploadTask.url}`)), 60000);
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Processing timeout after 60 seconds for: ${uploadTask.url}`
+                )
+              ),
+            60000
+          );
         });
-        
+
         const processingPromise = (async () => {
           try {
             let buffer: Buffer | null = null;
 
             if (this.isNotRawImg(uploadTask.url)) {
               console.log(`🔍 Processing attachment page: ${uploadTask.url}`);
-              const result = await this.downloadFromAttachmentPage(uploadTask.url);
+              const result = await this.downloadFromAttachmentPage(
+                uploadTask.url
+              );
               if (result) {
                 buffer = result.buffer;
-                console.log(`✅ Downloaded attachment: ${uploadTask.url} (${buffer.length} bytes)`);
+                console.log(
+                  `✅ Downloaded attachment: ${uploadTask.url} (${buffer.length} bytes)`
+                );
               } else {
-                console.error(`❌ Failed to download attachment page: ${uploadTask.url}`);
+                console.error(
+                  `❌ Failed to download attachment page: ${uploadTask.url}`
+                );
               }
             } else {
               try {
                 console.log(`🔍 Downloading raw file: ${uploadTask.url}`);
                 buffer = await this.s3Service.downloadFile(uploadTask.url);
-                console.log(`✅ Downloaded raw file: ${uploadTask.url} (${buffer.length} bytes)`);
+                console.log(
+                  `✅ Downloaded raw file: ${uploadTask.url} (${buffer.length} bytes)`
+                );
               } catch (rawDownloadError) {
-                console.error(`❌ Raw download failed, trying attachment page fallback: ${uploadTask.url}`);
+                console.error(
+                  `❌ Raw download failed, trying attachment page fallback: ${uploadTask.url}`
+                );
                 // Try attachment page method as fallback for raw images
                 const result = await this.downloadFromAttachmentPage(
                   uploadTask.url
                 );
                 if (result) {
                   buffer = result.buffer;
-                  console.log(`✅ Fallback download successful: ${uploadTask.url} (${buffer.length} bytes)`);
                 } else {
-                  console.error(`❌ Attachment page method also failed for raw image: ${uploadTask.url}`);
+                  console.error(
+                    `❌ Attachment page method also failed for raw image: ${uploadTask.url}`
+                  );
                 }
               }
             }
 
             if (buffer) {
-              console.log(`🔍 Uploading to S3: ${uploadTask.url} -> ${uploadTask.key}`);
               const contentType = this.s3Service.getContentType(uploadTask.url);
               const uploadCommand = new PutObjectCommand({
                 Bucket: this.s3Service.bucketName,
@@ -1684,8 +1737,6 @@ class ForumDetailPageScraper {
               const finalS3Url = `https://${this.s3Service.bucketName}.s3.${
                 process.env.S3_REGION || "us-east-2"
               }.wasabisys.com/${uploadTask.key}`;
-
-              console.log(`✅ Uploaded successfully: ${uploadTask.url} -> ${finalS3Url}`);
               return {
                 postId: uploadTask.postId,
                 s3Url: finalS3Url,
@@ -1704,7 +1755,9 @@ class ForumDetailPageScraper {
               };
             }
           } catch (error) {
-            console.error(`❌ Processing failed for ${uploadTask.url}: ${error}`);
+            console.error(
+              `❌ Processing failed for ${uploadTask.url}: ${error}`
+            );
             return {
               postId: uploadTask.postId,
               s3Url: uploadTask.url,
