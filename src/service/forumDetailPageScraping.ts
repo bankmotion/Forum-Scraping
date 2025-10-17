@@ -1875,27 +1875,27 @@ class ForumDetailPageScraper {
         await Promise.allSettled(dbPromises);
 
         // Log media count for each post in this batch
-        for (const postData of batch) {
-          const processedMedias = postMediaMap.get(postData.postId) || [];
-          const imageCount = processedMedias.filter(
-            (media) =>
-              media.s3Url.includes("s3.") &&
-              media.s3Url.includes("wasabisys.com") &&
-              !media.s3Url.includes("_thumb") &&
-              this.isImageUrl(media.s3Url)
-          ).length;
-          const videoCount = processedMedias.filter(
-            (media) =>
-              media.s3Url.includes("s3.") &&
-              media.s3Url.includes("wasabisys.com") &&
-              !media.s3Url.includes("_thumb") &&
-              this.isVideoUrl(media.s3Url)
-          ).length;
+        // for (const postData of batch) {
+        //   const processedMedias = postMediaMap.get(postData.postId) || [];
+        //   const imageCount = processedMedias.filter(
+        //     (media) =>
+        //       media.s3Url.includes("s3.") &&
+        //       media.s3Url.includes("wasabisys.com") &&
+        //       !media.s3Url.includes("_thumb") &&
+        //       this.isImageUrl(media.s3Url)
+        //   ).length;
+        //   const videoCount = processedMedias.filter(
+        //     (media) =>
+        //       media.s3Url.includes("s3.") &&
+        //       media.s3Url.includes("wasabisys.com") &&
+        //       !media.s3Url.includes("_thumb") &&
+        //       this.isVideoUrl(media.s3Url)
+        //   ).length;
 
-          console.log(
-            `Post ID ${postData.postId}: ${imageCount} images, ${videoCount} videos`
-          );
-        }
+        //   console.log(
+        //     `Post ID ${postData.postId}: ${imageCount} images, ${videoCount} videos`
+        //   );
+        // }
 
         totalProcessed += batch.length;
 
